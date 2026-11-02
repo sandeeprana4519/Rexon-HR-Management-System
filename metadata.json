@@ -1,0 +1,6 @@
+{
+  "name": "REXON HR Management System",
+  "description": "Multi-portal enterprise HR, security, and manpower operations management platform for REXON Security & Manpower Solution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

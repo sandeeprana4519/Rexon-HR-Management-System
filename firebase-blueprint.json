@@ -1,0 +1,574 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated REXON HR Management System user with RBAC role, branch scope, and assigned sites.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "role": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "assignedBranches": { "type": "array", "description": "Authorized branch IDs for multi-branch HR users." },
+        "assignedSiteIds": { "type": "array", "description": "Bounded list of authorized site IDs (max 50)." },
+        "permissions": { "type": "array", "description": "Bounded list of granular dot-notation permission strings (max 40)." },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "email", "phone", "role", "branchId", "assignedSiteIds", "permissions", "isActive", "createdAt", "updatedAt"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Operational REXON Employee record with dynamic service/designation assignments, document verification rollup, and soft-delete preservation. Zero sensitive Aadhaar/PAN/Bank/Salary fields.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "fatherOrSpouseName": { "type": "string", "maxLength": 120 },
+        "dateOfBirth": { "type": "string", "maxLength": 20 },
+        "gender": { "type": "string", "enum": ["Male", "Female", "Other"] },
+        "mobile": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "alternateMobile": { "type": "string", "maxLength": 20 },
+        "email": { "type": "string", "maxLength": 160 },
+        "currentAddress": { "type": "string", "maxLength": 300 },
+        "permanentAddress": { "type": "string", "maxLength": 300 },
+        "city": { "type": "string", "maxLength": 80 },
+        "state": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 10 },
+        "emergencyContactName": { "type": "string", "maxLength": 120 },
+        "emergencyContactNumber": { "type": "string", "maxLength": 20 },
+        "profilePhoto": { "type": "string", "maxLength": 2048 },
+        "joiningDate": { "type": "string", "maxLength": 20 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "branchName": { "type": "string", "maxLength": 160 },
+        "employmentType": { "type": "string", "enum": ["Permanent", "Contract", "Temporary", "Reliever"] },
+        "employeeStatus": { "type": "string", "enum": ["Active", "Inactive", "On Leave", "Suspended", "Left"] },
+        "assignedServiceCategories": { "type": "array", "description": "Assigned service categories (Security, Housekeeping, Manpower)." },
+        "assignedServiceIds": { "type": "array", "description": "Assigned Firestore service IDs." },
+        "assignedServiceNames": { "type": "array", "description": "Assigned service display names." },
+        "assignedDesignationIds": { "type": "array", "description": "Assigned Firestore designation IDs." },
+        "assignedDesignations": { "type": "array", "description": "Structured designation assignments with eligibility verification." },
+        "skillsAndExperience": { "type": "string", "maxLength": 400 },
+        "qualification": { "type": "string", "maxLength": 200 },
+        "trainingDetails": { "type": "string", "maxLength": 250 },
+        "licenseDetails": { "type": "string", "maxLength": 250 },
+        "reportingFieldOfficerUid": { "type": "string", "maxLength": 128 },
+        "reportingFieldOfficerName": { "type": "string", "maxLength": 120 },
+        "currentSiteId": { "type": "string", "maxLength": 64 },
+        "currentSiteName": { "type": "string", "maxLength": 200 },
+        "notes": { "type": "string", "maxLength": 400 },
+        "docVerificationSummary": { "type": "string", "enum": ["No Documents", "Pending", "Verified", "Rejected"] },
+        "totalDocumentsCount": { "type": "integer" },
+        "pendingDocumentsCount": { "type": "integer" },
+        "isActive": { "type": "boolean" },
+        "isDeleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "updatedBy": { "type": "string", "maxLength": 160 }
+      },
+      "required": ["employeeId", "fullName", "dateOfBirth", "gender", "mobile", "joiningDate", "branchId", "employmentType", "employeeStatus", "assignedDesignations", "docVerificationSummary", "isActive", "isDeleted", "createdAt", "updatedAt"]
+    },
+    "EmployeePrivate": {
+      "title": "EmployeePrivate",
+      "description": "Isolated sensitive KYC, Bank, and Salary records strictly hidden from Site Portal and Field Officer roles.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "salaryType": { "type": "string", "enum": ["Monthly", "Daily", "Hourly"] },
+        "basicSalary": { "type": "number" },
+        "bankAccountNumber": { "type": "string", "maxLength": 24 },
+        "bankAccountHolderName": { "type": "string", "maxLength": 120 },
+        "bankName": { "type": "string", "maxLength": 120 },
+        "ifscCode": { "type": "string", "maxLength": 16 },
+        "panNumber": { "type": "string", "maxLength": 12 },
+        "aadhaarNumber": { "type": "string", "maxLength": 16 },
+        "aadhaarMasked": { "type": "string", "maxLength": 20 },
+        "bankAccountMasked": { "type": "string", "maxLength": 24 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "updatedBy": { "type": "string", "maxLength": 160 }
+      },
+      "required": ["employeeId", "branchId", "salaryType", "basicSalary", "updatedAt"]
+    },
+    "EmployeeDocument": {
+      "title": "EmployeeDocument",
+      "description": "Employee KYC & qualification document metadata linked to private Firebase Storage objects with Pending/Verified/Rejected workflow.",
+      "type": "object",
+      "properties": {
+        "documentId": { "type": "string", "maxLength": 64 },
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "documentType": { "type": "string", "enum": ["Aadhaar Document", "PAN Document", "Photograph", "Address Proof", "Police Verification", "Qualification Certificates", "Training Certificates", "Experience Certificates", "Bank Proof", "Other Documents"] },
+        "isSensitiveKyc": { "type": "boolean" },
+        "fileName": { "type": "string", "maxLength": 120 },
+        "mimeType": { "type": "string", "maxLength": 80 },
+        "fileSizeBytes": { "type": "integer" },
+        "storagePath": { "type": "string", "maxLength": 512 },
+        "downloadUrl": { "type": "string", "maxLength": 2048 },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "uploadedBy": { "type": "string", "maxLength": 160 },
+        "uploadedByUid": { "type": "string", "maxLength": 128 },
+        "verificationStatus": { "type": "string", "enum": ["Pending", "Verified", "Rejected"] },
+        "verificationRemarks": { "type": "string", "maxLength": 250 },
+        "verifiedBy": { "type": "string", "maxLength": 160 },
+        "verifiedByUid": { "type": "string", "maxLength": 128 },
+        "verifiedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["documentId", "employeeId", "branchId", "documentType", "isSensitiveKyc", "fileName", "mimeType", "fileSizeBytes", "storagePath", "uploadedAt", "uploadedByUid", "verificationStatus", "updatedAt"]
+    },
+    "EmployeeHistory": {
+      "title": "EmployeeHistory",
+      "description": "Immutable chronological trail of Employee Designation changes, Site Assignments, and Profile/Document activities.",
+      "type": "object",
+      "properties": {
+        "historyId": { "type": "string", "maxLength": 64 },
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "category": { "type": "string", "enum": ["Designation", "SiteAssignment", "Activity"] },
+        "action": { "type": "string", "maxLength": 100 },
+        "summary": { "type": "string", "maxLength": 400 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["historyId", "employeeId", "branchId", "category", "action", "summary", "actorUid", "actorRole", "timestamp"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Master Branch record managed exclusively by Administrators with soft-delete support.",
+      "type": "object",
+      "properties": {
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchName": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "branchCode": { "type": "string", "minLength": 2, "maxLength": 24 },
+        "managerName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "mobile": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "address": { "type": "string", "minLength": 5, "maxLength": 250 },
+        "city": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "state": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "pinCode": { "type": "string", "minLength": 6, "maxLength": 6 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdDate": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "isDeleted": { "type": "boolean" }
+      },
+      "required": ["branchId", "branchName", "branchCode", "managerName", "mobile", "email", "address", "city", "state", "pinCode", "status", "createdDate", "updatedAt", "isDeleted"]
+    },
+    "HRProfile": {
+      "title": "HRProfile",
+      "description": "HR account profile provisioned via Firebase Authentication without storing plain-text passwords.",
+      "type": "object",
+      "properties": {
+        "hrId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "mobile": { "type": "string", "minLength": 7, "maxLength": 20 },
+        "profilePhoto": { "type": "string", "maxLength": 1024 },
+        "assignedBranches": { "type": "array", "description": "Bounded list of assigned branchIds (max 25)." },
+        "hrDesignation": { "type": "string", "enum": ["Senior HR", "Branch HR", "Site HR", "HR Executive", "Accountant"] },
+        "permissionProfile": { "type": "string", "maxLength": 80 },
+        "permissions": { "type": "array", "description": "Bounded list of dot-notation HR permission keys (max 40)." },
+        "joiningDate": { "type": "string", "maxLength": 32 },
+        "accountStatus": { "type": "string", "enum": ["Active", "Inactive", "Suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["hrId", "uid", "fullName", "email", "mobile", "assignedBranches", "hrDesignation", "permissionProfile", "permissions", "joiningDate", "accountStatus", "createdAt", "updatedAt"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Contracted Client organization master record supporting multiple Sites.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "minLength": 3, "maxLength": 150 },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "companyType": { "type": "string", "enum": ["Factory", "Manufacturing Company", "Hospital", "Mall", "Society", "Warehouse", "Corporate Office", "School/College", "Hotel", "Other"] },
+        "gstNumber": { "type": "string", "maxLength": 15 },
+        "panNumber": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "registeredAddress": { "type": "string", "maxLength": 300 },
+        "state": { "type": "string", "maxLength": 80 },
+        "city": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 6 },
+        "contactPerson": { "type": "string", "maxLength": 100 },
+        "contactDesignation": { "type": "string", "maxLength": 80 },
+        "mobile": { "type": "string", "maxLength": 20 },
+        "alternateMobile": { "type": "string", "maxLength": 20 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "billingAddress": { "type": "string", "maxLength": 300 },
+        "billingContact": { "type": "string", "maxLength": 100 },
+        "contractStartDate": { "type": "string", "maxLength": 32 },
+        "contractEndDate": { "type": "string", "maxLength": 32 },
+        "paymentTerms": { "type": "string", "maxLength": 80 },
+        "assignedBranch": { "type": "string", "maxLength": 64 },
+        "clientStatus": { "type": "string", "enum": ["Active", "Inactive", "On Hold", "Expired"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "isArchived": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "companyName", "displayName", "companyType", "panNumber", "registeredAddress", "state", "city", "pinCode", "contactPerson", "contactDesignation", "mobile", "email", "billingAddress", "billingContact", "contractStartDate", "contractEndDate", "paymentTerms", "assignedBranch", "clientStatus", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Site": {
+      "title": "Site",
+      "description": "Deployment Site record linked to one parent Client with historical preservation.",
+      "type": "object",
+      "properties": {
+        "siteId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "siteName": { "type": "string", "minLength": 3, "maxLength": 140 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "clientName": { "type": "string", "maxLength": 150 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "siteType": { "type": "string", "enum": ["Factory", "Warehouse", "Office", "Hospital", "Mall", "Society", "School/College", "Hotel", "Construction Site", "Other"] },
+        "fullAddress": { "type": "string", "maxLength": 300 },
+        "city": { "type": "string", "maxLength": 80 },
+        "state": { "type": "string", "maxLength": 80 },
+        "pinCode": { "type": "string", "maxLength": 6 },
+        "googleMapsLocation": { "type": "string", "maxLength": 250 },
+        "siteContactPerson": { "type": "string", "maxLength": 100 },
+        "siteManagerName": { "type": "string", "maxLength": 100 },
+        "managerMobile": { "type": "string", "maxLength": 20 },
+        "managerEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "startDate": { "type": "string", "maxLength": 32 },
+        "contractEndDate": { "type": "string", "maxLength": 32 },
+        "siteStatus": { "type": "string", "enum": ["Active", "Inactive", "Pending", "Suspended"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "isArchived": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["siteId", "siteName", "clientId", "clientName", "branchId", "siteType", "fullAddress", "city", "state", "pinCode", "siteContactPerson", "siteManagerName", "managerMobile", "managerEmail", "startDate", "contractEndDate", "siteStatus", "isArchived", "createdAt", "updatedAt"]
+    },
+    "Service": {
+      "title": "Service",
+      "description": "Dynamic REXON Service catalog record under Security, Housekeeping, or Manpower.",
+      "type": "object",
+      "properties": {
+        "serviceId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "serviceName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "serviceCategory": { "type": "string", "enum": ["Security", "Housekeeping", "Manpower"] },
+        "serviceCode": { "type": "string", "minLength": 2, "maxLength": 24 },
+        "description": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serviceId", "serviceName", "serviceCategory", "serviceCode", "description", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Designation": {
+      "title": "Designation",
+      "description": "Extensible Designation record linked to a Service Category and Related Service without code changes.",
+      "type": "object",
+      "properties": {
+        "designationId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "designationName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "serviceCategory": { "type": "string", "enum": ["Security", "Housekeeping", "Manpower"] },
+        "relatedServiceId": { "type": "string", "maxLength": 64 },
+        "relatedServiceName": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "requiredSkills": { "type": "string", "maxLength": 250 },
+        "qualification": { "type": "string", "maxLength": 160 },
+        "trainingRequirements": { "type": "string", "maxLength": 200 },
+        "licenseRequirements": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["designationId", "designationName", "serviceCategory", "relatedServiceId", "relatedServiceName", "description", "requiredSkills", "qualification", "trainingRequirements", "licenseRequirements", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "SiteService": {
+      "title": "SiteService",
+      "description": "Site-level Service & Designation configuration enforcing non-negative vacancy counts (Vacant = Required - Deployed).",
+      "type": "object",
+      "properties": {
+        "siteServiceId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "serviceCategory": { "type": "string", "enum": ["Security", "Housekeeping", "Manpower"] },
+        "serviceId": { "type": "string", "maxLength": 64 },
+        "serviceName": { "type": "string", "maxLength": 100 },
+        "designationId": { "type": "string", "maxLength": 64 },
+        "designationName": { "type": "string", "maxLength": 100 },
+        "requiredCount": { "type": "integer", "description": "Sanctioned post count >= 1." },
+        "deployedCount": { "type": "integer", "description": "Currently deployed count >= 0 and <= requiredCount." },
+        "vacantCount": { "type": "integer", "description": "Non-negative vacancy = requiredCount - deployedCount." },
+        "shiftType": { "type": "string", "maxLength": 60 },
+        "workingHours": { "type": "string", "maxLength": 40 },
+        "weeklyOff": { "type": "string", "maxLength": 60 },
+        "serviceStartDate": { "type": "string", "maxLength": 32 },
+        "serviceEndDate": { "type": "string", "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["siteServiceId", "siteId", "siteName", "clientId", "branchId", "serviceCategory", "serviceId", "serviceName", "designationId", "designationName", "requiredCount", "deployedCount", "vacantCount", "shiftType", "workingHours", "weeklyOff", "serviceStartDate", "serviceEndDate", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Approval": {
+      "title": "Approval",
+      "description": "Sensitive HR action approval request routed to Administrator queue (Pending, Approved, Rejected, Cancelled).",
+      "type": "object",
+      "properties": {
+        "approvalId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requestType": { "type": "string", "enum": ["Site Deletion", "Client Deletion", "Client Sensitive Change", "Employee Deletion", "Employee Sensitive Change", "Site Sanctioned Strength Override", "Permission Change Request", "Branch Scope Exception", "Field Officer Replacement Request", "Field Officer Transfer Request", "Manpower Shortage Escalation"] },
+        "module": { "type": "string", "enum": ["Client", "Site", "Employee", "Assignment", "Permissions", "Branch", "Service", "Designation"] },
+        "targetRecordId": { "type": "string", "maxLength": 64 },
+        "targetRecordName": { "type": "string", "maxLength": 140 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "requestedByUid": { "type": "string", "maxLength": 128 },
+        "requestedByName": { "type": "string", "maxLength": 120 },
+        "requestedByRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "summary": { "type": "string", "minLength": 5, "maxLength": 160 },
+        "reason": { "type": "string", "minLength": 8, "maxLength": 400 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Cancelled"] },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewRemarks": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "decidedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["approvalId", "requestType", "module", "targetRecordId", "targetRecordName", "branchId", "requestedByUid", "requestedByName", "requestedByRole", "summary", "reason", "status", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable append-only operational and security audit log across all Phase 2 & Phase 3 modules.",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "maxLength": 64 },
+        "action": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "module": { "type": "string", "enum": ["Branch", "HR", "Client", "Site", "Employee", "Assignment", "SiteService", "Service", "Designation", "Permissions", "Approvals"] },
+        "recordId": { "type": "string", "maxLength": 64 },
+        "performedBy": { "type": "string", "maxLength": 200 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "summary": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["action", "actorUid", "branchId", "createdAt"]
+    },
+    "EmployeeAssignment": {
+      "title": "EmployeeAssignment",
+      "description": "Employee site deployment & shift roster record supporting multiple assignments, future scheduling, and inter-site transfer lineage.",
+      "type": "object",
+      "properties": {
+        "assignmentId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "employeeName": { "type": "string", "maxLength": 120 },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "branchName": { "type": "string", "maxLength": 120 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "siteServiceId": { "type": "string", "maxLength": 64 },
+        "serviceCategory": { "type": "string", "enum": ["Security", "Housekeeping", "Manpower"] },
+        "serviceId": { "type": "string", "maxLength": 64 },
+        "serviceName": { "type": "string", "maxLength": 100 },
+        "designationId": { "type": "string", "maxLength": 64 },
+        "designationName": { "type": "string", "maxLength": 100 },
+        "shift": { "type": "string", "maxLength": 80 },
+        "shiftStartTime": { "type": "string", "maxLength": 10 },
+        "shiftEndTime": { "type": "string", "maxLength": 10 },
+        "reportingTime": { "type": "string", "maxLength": 10 },
+        "dutyHours": { "type": "number" },
+        "weeklyOff": { "type": "string", "maxLength": 60 },
+        "startDate": { "type": "string", "maxLength": 20 },
+        "endDate": { "type": "string", "maxLength": 20 },
+        "reportingInstructions": { "type": "string", "maxLength": 400 },
+        "remarks": { "type": "string", "maxLength": 300 },
+        "assignmentStatus": { "type": "string", "enum": ["Active", "Upcoming", "Completed", "Transferred", "Cancelled"] },
+        "previousAssignmentId": { "type": "string", "maxLength": 64 },
+        "previousSiteId": { "type": "string", "maxLength": 64 },
+        "previousSiteName": { "type": "string", "maxLength": 140 },
+        "transferredToAssignmentId": { "type": "string", "maxLength": 64 },
+        "transferredToSiteId": { "type": "string", "maxLength": 64 },
+        "transferredToSiteName": { "type": "string", "maxLength": 140 },
+        "assignedBy": { "type": "string", "maxLength": 160 },
+        "assignedByRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["assignmentId", "employeeId", "employeeName", "branchId", "clientId", "siteId", "siteName", "serviceCategory", "serviceId", "designationId", "shift", "shiftStartTime", "shiftEndTime", "reportingTime", "dutyHours", "weeklyOff", "startDate", "endDate", "assignmentStatus", "assignedBy", "createdBy", "createdAt", "updatedAt"]
+    },
+    "AssignmentHistory": {
+      "title": "AssignmentHistory",
+      "description": "Append-only assignment lifecycle history (Assigned, Transferred, Modified, Ended, Cancelled, FO Actions, Approvals).",
+      "type": "object",
+      "properties": {
+        "historyId": { "type": "string", "maxLength": 64 },
+        "assignmentId": { "type": "string", "maxLength": 64 },
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "employeeName": { "type": "string", "maxLength": 120 },
+        "linkedUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "previousSiteId": { "type": "string", "maxLength": 64 },
+        "previousSiteName": { "type": "string", "maxLength": 140 },
+        "newSiteId": { "type": "string", "maxLength": 64 },
+        "newSiteName": { "type": "string", "maxLength": 140 },
+        "actionType": { "type": "string", "maxLength": 80 },
+        "summary": { "type": "string", "maxLength": 400 },
+        "remarks": { "type": "string", "maxLength": 300 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["historyId", "assignmentId", "employeeId", "branchId", "siteId", "actionType", "summary", "actorUid", "actorRole", "timestamp"]
+    },
+    "ManpowerShortage": {
+      "title": "ManpowerShortage",
+      "description": "Field Officer / HR site manpower shortage alert and fulfillment tracker.",
+      "type": "object",
+      "properties": {
+        "shortageId": { "type": "string", "maxLength": 64 },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "serviceCategory": { "type": "string", "enum": ["Security", "Housekeeping", "Manpower"] },
+        "serviceId": { "type": "string", "maxLength": 64 },
+        "serviceName": { "type": "string", "maxLength": 100 },
+        "designationId": { "type": "string", "maxLength": 64 },
+        "designationName": { "type": "string", "maxLength": 100 },
+        "shift": { "type": "string", "maxLength": 80 },
+        "shortageCount": { "type": "integer" },
+        "urgency": { "type": "string", "enum": ["Normal", "High", "Critical"] },
+        "dateReportedFor": { "type": "string", "maxLength": 20 },
+        "reason": { "type": "string", "maxLength": 400 },
+        "status": { "type": "string", "enum": ["Open", "Acknowledged", "Resolved"] },
+        "reportedByUid": { "type": "string", "maxLength": 128 },
+        "reportedByName": { "type": "string", "maxLength": 120 },
+        "reportedByRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "resolutionRemarks": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["shortageId", "siteId", "branchId", "serviceCategory", "serviceId", "designationId", "shortageCount", "urgency", "dateReportedFor", "reason", "status", "reportedByUid", "createdAt", "updatedAt"]
+    },
+    "SiteDeploymentSummary": {
+      "title": "SiteDeploymentSummary",
+      "description": "Sanitized zero-PII site manpower summary readable by Site Portal accounts for their own assignedSiteIds.",
+      "type": "object",
+      "properties": {
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "totalRequired": { "type": "integer" },
+        "totalDeployed": { "type": "integer" },
+        "totalVacant": { "type": "integer" },
+        "totalActiveAssignments": { "type": "integer" },
+        "totalUpcomingAssignments": { "type": "integer" },
+        "lines": { "type": "array" },
+        "shiftBreakdown": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["siteId", "siteName", "clientId", "branchId", "totalRequired", "totalDeployed", "totalVacant", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Master RBAC user profiles across Admin, HR, Field Officer, Site, and Employee portals."
+    },
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Operational employee records with dynamic designation checks and zero sensitive PII."
+    },
+    "/employeePrivate/{employeeId}": {
+      "schema": { "$ref": "#/entities/EmployeePrivate" },
+      "description": "Strictly isolated employee Aadhaar, PAN, Bank, and Salary details hidden from Site and Field Officer portals."
+    },
+    "/employeeDocuments/{documentId}": {
+      "schema": { "$ref": "#/entities/EmployeeDocument" },
+      "description": "Employee KYC & qualification documents stored privately in Firebase Storage with verification status."
+    },
+    "/employeeHistory/{historyId}": {
+      "schema": { "$ref": "#/entities/EmployeeHistory" },
+      "description": "Append-only employee Designation, Site Assignment, and Activity history."
+    },
+    "/branches/{branchId}": {
+      "schema": { "$ref": "#/entities/Branch" },
+      "description": "Operational branches managed exclusively by Admin."
+    },
+    "/hrProfiles/{hrId}": {
+      "schema": { "$ref": "#/entities/HRProfile" },
+      "description": "HR master accounts and permission profiles provisioned via Firebase Auth and trusted backend."
+    },
+    "/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/Client" },
+      "description": "Contracted client organizations managed by authorized HR and Admin."
+    },
+    "/sites/{siteId}": {
+      "schema": { "$ref": "#/entities/Site" },
+      "description": "Deployed client sites linked to clients/{clientId} and scoped by branchId and assignedSiteIds."
+    },
+    "/services/{serviceId}": {
+      "schema": { "$ref": "#/entities/Service" },
+      "description": "Dynamic Security, Housekeeping, and Manpower master service catalog."
+    },
+    "/designations/{designationId}": {
+      "schema": { "$ref": "#/entities/Designation" },
+      "description": "Dynamic designations linked to services/{serviceId} with qualification, training, and license criteria."
+    },
+    "/siteServices/{siteServiceId}": {
+      "schema": { "$ref": "#/entities/SiteService" },
+      "description": "Multi-service site manpower configurations enforcing non-negative vacancy calculations."
+    },
+    "/approvals/{approvalId}": {
+      "schema": { "$ref": "#/entities/Approval" },
+      "description": "Sensitive HR action approval workflow queue reviewed by Administrators."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable append-only security, permission, approval, and master data audit trail."
+    },
+    "/employeeAssignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/EmployeeAssignment" },
+      "description": "Employee site assignments, shifts, upcoming rosters, and inter-site transfer lineage."
+    },
+    "/assignmentHistory/{historyId}": {
+      "schema": { "$ref": "#/entities/AssignmentHistory" },
+      "description": "Append-only chronological history of all site assignment, transfer, remark, and approval events."
+    },
+    "/manpowerShortages/{shortageId}": {
+      "schema": { "$ref": "#/entities/ManpowerShortage" },
+      "description": "Field Officer and HR site manpower shortage reports and fulfillment statuses."
+    },
+    "/siteDeploymentSummaries/{siteId}": {
+      "schema": { "$ref": "#/entities/SiteDeploymentSummary" },
+      "description": "Sanitized zero-PII site manpower and shift deployment summary for Site Portal."
+    }
+  }
+}

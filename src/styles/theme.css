@@ -1,0 +1,68 @@
+/* ==========================================================================
+   REXON HR MANAGEMENT SYSTEM — DESIGN TOKENS & TYPOGRAPHY
+   Theme: Soft White Canvas, Coffee Brown Primary, Light Beige Surfaces
+   ========================================================================== */
+
+:root {
+  --rexon-canvas: #faf8f5;
+  --rexon-surface: #ffffff;
+  --rexon-beige: #f3ede4;
+  --rexon-beige-muted: #efe7dc;
+  --rexon-border: #e5ddd2;
+  --rexon-border-strong: #d4c7b8;
+
+  --rexon-coffee: #5c3d2e;
+  --rexon-coffee-hover: #4a3023;
+  --rexon-coffee-active: #3b251a;
+  --rexon-coffee-tint: #ede3d8;
+
+  --rexon-text: #1f1916;
+  --rexon-text-secondary: #574b43;
+  --rexon-text-muted: #7d6f65;
+
+  --rexon-success: #166534;
+  --rexon-warning: #b45309;
+  --rexon-danger: #b91c1c;
+
+  --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Public Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body {
+  font-family: var(--font-body);
+  background-color: var(--rexon-canvas);
+  color: var(--rexon-text);
+  line-height: 1.5;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3,
+h4,
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

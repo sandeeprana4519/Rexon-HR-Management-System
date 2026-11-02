@@ -1,0 +1,1683 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------------
+    // 0. Global Default-Deny Safety Net
+    // ------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 1. Core Security Primitives & RBAC Helpers
+    //    Never trust client-supplied roles; verify against users/{request.auth.uid}
+    //    or verified bootstrapped owner email.
+    // ------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function userDocPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email == 'sandeeprana4519@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function hasActiveProfile() {
+      return isSignedIn()
+        && exists(userDocPath())
+        && get(userDocPath()).data.isActive == true;
+    }
+
+    function callerData() {
+      return get(userDocPath()).data;
+    }
+
+    function hasRole(targetRole) {
+      return hasActiveProfile() && callerData().role == targetRole;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || hasRole('admin');
+    }
+
+    function isHR() {
+      return hasRole('hr');
+    }
+
+    function isFieldOfficer() {
+      return hasRole('field_officer');
+    }
+
+    function isSiteManager() {
+      return hasRole('site');
+    }
+
+    function isEmployee() {
+      return hasRole('employee');
+    }
+
+    function isAuthorizedForBranch(branchId) {
+      return isAdmin()
+        || (
+          isHR()
+          && (
+            callerData().branchId == branchId
+            || ('assignedBranches' in callerData() && branchId in callerData().assignedBranches)
+          )
+        );
+    }
+
+    function isAuthorizedFieldOfficerBranch(branchId) {
+      return isFieldOfficer()
+        && (
+          callerData().branchId == branchId
+          || ('assignedBranches' in callerData() && branchId in callerData().assignedBranches)
+        );
+    }
+
+    function hasPermission(perm) {
+      return isAdmin() || (isHR() && perm in callerData().permissions);
+    }
+
+    function hasAnyPermission(perms) {
+      return isAdmin() || (isHR() && callerData().permissions.hasAny(perms));
+    }
+
+    function isAssignedToSite(siteId) {
+      return isAdmin()
+        || (isHR() && siteId in callerData().assignedSiteIds)
+        || (isFieldOfficer() && siteId in callerData().assignedSiteIds)
+        || (isSiteManager() && siteId in callerData().assignedSiteIds);
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. Schema Validation Helpers (Anti-Update-Gap & Size Bounds)
+    // ------------------------------------------------------------------------
+    function isValidRoleValue(role) {
+      return role in ['admin', 'hr', 'field_officer', 'site', 'employee'];
+    }
+
+    function isValidServiceCategory(cat) {
+      return cat in ['Security', 'Housekeeping', 'Manpower'];
+    }
+
+    function isValidBoundedStringArray(arr, maxLen) {
+      return arr is list
+        && arr.size() <= maxLen
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 128));
+    }
+
+    function isValidUserPayload(data, targetUid) {
+      return data.keys().hasAll([
+          'uid', 'fullName', 'email', 'phone', 'role',
+          'branchId', 'assignedSiteIds', 'permissions',
+          'isActive', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == targetUid
+        && data.uid is string && data.uid.size() <= 128
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 20
+        && isValidRoleValue(data.role)
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && (!('assignedBranches' in data) || isValidBoundedStringArray(data.assignedBranches, 25))
+        && isValidBoundedStringArray(data.assignedSiteIds, 50)
+        && isValidBoundedStringArray(data.permissions, 40)
+        && data.isActive is bool;
+    }
+
+    function isValidBranchPayload(data, branchId) {
+      return data.keys().hasAll([
+          'branchId', 'branchName', 'branchCode', 'managerName',
+          'mobile', 'email', 'address', 'city', 'state', 'pinCode',
+          'status', 'createdDate', 'updatedAt', 'isDeleted'
+        ])
+        && data.branchId == branchId
+        && data.branchName is string && data.branchName.size() >= 3 && data.branchName.size() <= 120
+        && data.branchCode is string && data.branchCode.size() >= 2 && data.branchCode.size() <= 24
+        && data.managerName is string && data.managerName.size() >= 2 && data.managerName.size() <= 100
+        && data.mobile is string && data.mobile.size() >= 7 && data.mobile.size() <= 20
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.address is string && data.address.size() >= 5 && data.address.size() <= 250
+        && data.city is string && data.city.size() >= 2 && data.city.size() <= 80
+        && data.state is string && data.state.size() >= 2 && data.state.size() <= 80
+        && data.pinCode is string && data.pinCode.size() == 6
+        && data.status in ['Active', 'Inactive']
+        && data.isDeleted is bool;
+    }
+
+    function isValidHRProfilePayload(data, hrId) {
+      return data.keys().hasAll([
+          'hrId', 'uid', 'fullName', 'email', 'mobile',
+          'assignedBranches', 'hrDesignation', 'permissionProfile',
+          'permissions', 'joiningDate', 'accountStatus', 'createdAt', 'updatedAt'
+        ])
+        && !('password' in data)
+        && data.hrId == hrId
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.mobile is string && data.mobile.size() >= 7 && data.mobile.size() <= 20
+        && isValidBoundedStringArray(data.assignedBranches, 25)
+        && isValidBoundedStringArray(data.permissions, 40)
+        && data.hrDesignation in ['Senior HR', 'Branch HR', 'Site HR', 'HR Executive', 'Accountant']
+        && data.permissionProfile is string && data.permissionProfile.size() >= 2 && data.permissionProfile.size() <= 80
+        && data.accountStatus in ['Active', 'Inactive', 'Suspended'];
+    }
+
+    function isValidClientPayload(data, clientId) {
+      return data.keys().hasAll([
+          'clientId', 'companyName', 'displayName', 'companyType',
+          'gstNumber', 'panNumber', 'registeredAddress', 'state', 'city', 'pinCode',
+          'contactPerson', 'contactDesignation', 'mobile', 'email',
+          'billingAddress', 'billingContact', 'contractStartDate', 'contractEndDate',
+          'paymentTerms', 'assignedBranch', 'clientStatus', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.clientId == clientId
+        && data.companyName is string && data.companyName.size() >= 3 && data.companyName.size() <= 150
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 100
+        && data.panNumber is string && data.panNumber.size() == 10
+        && data.assignedBranch is string && data.assignedBranch.size() >= 1 && data.assignedBranch.size() <= 64
+        && data.clientStatus in ['Active', 'Inactive', 'On Hold', 'Expired'];
+    }
+
+    function isValidSitePayload(data, siteId) {
+      return data.keys().hasAll([
+          'siteId', 'siteName', 'clientId', 'clientName', 'branchId',
+          'siteType', 'fullAddress', 'city', 'state', 'pinCode',
+          'siteContactPerson', 'siteManagerName', 'managerMobile', 'managerEmail',
+          'startDate', 'contractEndDate', 'siteStatus', 'isArchived', 'createdAt', 'updatedAt'
+        ])
+        && data.siteId == siteId
+        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
+        && data.clientName is string && data.clientName.size() >= 2 && data.clientName.size() <= 150
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 3 && data.siteName.size() <= 140
+        && data.siteStatus in ['Active', 'Inactive', 'Pending', 'Suspended']
+        && data.isArchived is bool;
+    }
+
+    function isValidServicePayload(data, serviceId) {
+      return data.keys().hasAll([
+          'serviceId', 'serviceName', 'serviceCategory', 'serviceCode',
+          'description', 'status', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'serviceId', 'serviceName', 'serviceCategory', 'serviceCode',
+          'description', 'status', 'createdBy', 'createdAt', 'updatedAt', 'serverUpdatedAt'
+        ])
+        && data.serviceId == serviceId
+        && data.serviceName is string && data.serviceName.size() >= 2 && data.serviceName.size() <= 100
+        && isValidServiceCategory(data.serviceCategory)
+        && data.serviceCode is string && data.serviceCode.size() >= 2 && data.serviceCode.size() <= 24
+        && data.description is string && data.description.size() <= 300
+        && data.status in ['Active', 'Inactive']
+        && data.createdBy is string && data.createdBy.size() <= 160
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidDesignationPayload(data, designationId) {
+      return data.keys().hasAll([
+          'designationId', 'designationName', 'serviceCategory',
+          'relatedServiceId', 'relatedServiceName', 'description',
+          'requiredSkills', 'qualification', 'trainingRequirements',
+          'licenseRequirements', 'status', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'designationId', 'designationName', 'serviceCategory',
+          'relatedServiceId', 'relatedServiceName', 'description',
+          'requiredSkills', 'qualification', 'trainingRequirements',
+          'licenseRequirements', 'status', 'createdBy', 'createdAt', 'updatedAt', 'serverUpdatedAt'
+        ])
+        && data.designationId == designationId
+        && data.designationName is string && data.designationName.size() >= 2 && data.designationName.size() <= 100
+        && isValidServiceCategory(data.serviceCategory)
+        && data.relatedServiceId is string && data.relatedServiceId.size() >= 1 && data.relatedServiceId.size() <= 64
+        && data.relatedServiceName is string && data.relatedServiceName.size() >= 2 && data.relatedServiceName.size() <= 100
+        && data.description is string && data.description.size() <= 300
+        && data.requiredSkills is string && data.requiredSkills.size() <= 250
+        && data.qualification is string && data.qualification.size() <= 160
+        && data.trainingRequirements is string && data.trainingRequirements.size() <= 200
+        && data.licenseRequirements is string && data.licenseRequirements.size() <= 200
+        && data.status in ['Active', 'Inactive']
+        && data.createdBy is string && data.createdBy.size() <= 160
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidSiteServicePayload(data, siteServiceId) {
+      return data.keys().hasAll([
+          'siteServiceId', 'siteId', 'siteName', 'clientId', 'branchId',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'requiredCount', 'deployedCount', 'vacantCount',
+          'shiftType', 'workingHours', 'weeklyOff',
+          'serviceStartDate', 'serviceEndDate', 'notes',
+          'status', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'siteServiceId', 'siteId', 'siteName', 'clientId', 'branchId',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'requiredCount', 'deployedCount', 'vacantCount',
+          'shiftType', 'workingHours', 'weeklyOff',
+          'serviceStartDate', 'serviceEndDate', 'notes',
+          'status', 'createdBy', 'createdAt', 'updatedAt', 'serverUpdatedAt'
+        ])
+        && data.siteServiceId == siteServiceId
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 140
+        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && isValidServiceCategory(data.serviceCategory)
+        && data.serviceId is string && data.serviceId.size() >= 1 && data.serviceId.size() <= 64
+        && data.serviceName is string && data.serviceName.size() >= 2 && data.serviceName.size() <= 100
+        && data.designationId is string && data.designationId.size() >= 1 && data.designationId.size() <= 64
+        && data.designationName is string && data.designationName.size() >= 2 && data.designationName.size() <= 100
+        // Strict Non-Negative Vacancy Invariant: Vacant = Required - Deployed >= 0
+        && data.requiredCount is int && data.requiredCount >= 1 && data.requiredCount <= 10000
+        && data.deployedCount is int && data.deployedCount >= 0 && data.deployedCount <= data.requiredCount
+        && data.vacantCount is int && data.vacantCount >= 0
+        && data.vacantCount == data.requiredCount - data.deployedCount
+        && data.shiftType is string && data.shiftType.size() >= 2 && data.shiftType.size() <= 60
+        && data.workingHours is string && data.workingHours.size() >= 2 && data.workingHours.size() <= 40
+        && data.weeklyOff is string && data.weeklyOff.size() >= 2 && data.weeklyOff.size() <= 60
+        && data.serviceStartDate is string && data.serviceStartDate.size() <= 32
+        && data.serviceEndDate is string && data.serviceEndDate.size() <= 32
+        && data.notes is string && data.notes.size() <= 300
+        && data.status in ['Active', 'Inactive']
+        && data.createdBy is string && data.createdBy.size() <= 160
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidApprovalPayload(data, approvalId) {
+      return data.keys().hasAll([
+          'approvalId', 'requestType', 'module', 'targetRecordId', 'targetRecordName',
+          'branchId', 'requestedByUid', 'requestedByName', 'requestedByRole',
+          'summary', 'reason', 'status', 'reviewedByUid', 'reviewedByName',
+          'reviewRemarks', 'createdAt', 'updatedAt', 'decidedAt'
+        ])
+        && data.keys().hasOnly([
+          'approvalId', 'requestType', 'module', 'targetRecordId', 'targetRecordName',
+          'branchId', 'requestedByUid', 'requestedByName', 'requestedByRole',
+          'summary', 'reason', 'proposedPayload', 'status', 'reviewedByUid',
+          'reviewedByName', 'reviewRemarks', 'createdAt', 'updatedAt', 'decidedAt',
+          'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.approvalId == approvalId
+        && data.requestType in [
+          'Site Deletion',
+          'Client Deletion',
+          'Client Sensitive Change',
+          'Employee Deletion',
+          'Employee Sensitive Change',
+          'Site Sanctioned Strength Override',
+          'Permission Change Request',
+          'Branch Scope Exception',
+          'Field Officer Replacement Request',
+          'Field Officer Transfer Request',
+          'Manpower Shortage Escalation'
+        ]
+        && data.module in [
+          'Client', 'Site', 'Employee', 'Permissions', 'Branch', 'Service', 'Designation', 'Assignment'
+        ]
+        && data.targetRecordId is string && data.targetRecordId.size() >= 1 && data.targetRecordId.size() <= 64
+        && data.targetRecordName is string && data.targetRecordName.size() >= 1 && data.targetRecordName.size() <= 140
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.requestedByUid is string && data.requestedByUid.size() >= 1 && data.requestedByUid.size() <= 128
+        && data.requestedByName is string && data.requestedByName.size() >= 2 && data.requestedByName.size() <= 120
+        && isValidRoleValue(data.requestedByRole)
+        && data.summary is string && data.summary.size() >= 5 && data.summary.size() <= 220
+        && data.reason is string && data.reason.size() >= 8 && data.reason.size() <= 400
+        && data.status in ['Pending', 'Approved', 'Rejected', 'Cancelled']
+        && (data.reviewedByUid == null || (data.reviewedByUid is string && data.reviewedByUid.size() <= 128))
+        && (data.reviewedByName == null || (data.reviewedByName is string && data.reviewedByName.size() <= 120))
+        && data.reviewRemarks is string && data.reviewRemarks.size() <= 300
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40
+        && (data.decidedAt == null || (data.decidedAt is string && data.decidedAt.size() <= 40));
+    }
+
+    function isValidPhase2AuditLogPayload(data) {
+      return data.keys().hasAll([
+          'logId', 'action', 'module', 'recordId', 'performedBy',
+          'actorUid', 'role', 'branchId', 'timestamp', 'summary', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'logId', 'action', 'module', 'recordId', 'performedBy',
+          'actorUid', 'role', 'branchId', 'timestamp', 'summary', 'createdAt'
+        ])
+        && data.logId is string && data.logId.size() >= 3 && data.logId.size() <= 64
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 120
+        && data.module in [
+          'Branch', 'HR', 'Client', 'Site', 'Employee', 'SiteService',
+          'Service', 'Designation', 'Permissions', 'Approvals', 'Assignment'
+        ]
+        && data.recordId is string && data.recordId.size() >= 1 && data.recordId.size() <= 64
+        && data.performedBy is string && data.performedBy.size() >= 2 && data.performedBy.size() <= 200
+        && data.actorUid == request.auth.uid
+        && isValidRoleValue(data.role)
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.timestamp is string && data.timestamp.size() <= 40
+        && data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 400
+        && data.createdAt == request.time;
+    }
+
+    function isValidLegacyAuditLogPayload(data) {
+      return data.keys().hasAll(['actorUid', 'actorRole', 'action', 'targetPath', 'createdAt'])
+        && data.keys().hasOnly(['actorUid', 'actorRole', 'action', 'targetPath', 'branchId', 'createdAt'])
+        && data.actorUid == request.auth.uid
+        && data.actorRole is string && data.actorRole.size() <= 32
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 120
+        && data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 200
+        && (!('branchId' in data) || (data.branchId is string && data.branchId.size() <= 64))
+        && data.createdAt == request.time;
+    }
+
+    function isValidAuditLogPayload(data) {
+      return isValidPhase2AuditLogPayload(data) || isValidLegacyAuditLogPayload(data);
+    }
+
+    function isValidEmployeePayload(data, employeeId) {
+      return data.keys().hasAll([
+          'employeeId', 'fullName', 'dateOfBirth', 'gender', 'mobile',
+          'joiningDate', 'branchId', 'employmentType', 'employeeStatus',
+          'assignedServiceCategories', 'assignedDesignationIds', 'assignedDesignations',
+          'docVerificationSummary', 'isActive', 'isDeleted', 'createdAt', 'updatedAt'
+        ])
+        // Strictly block sensitive PII & salary fields on operational employees/{employeeId}
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('ifscCode' in data)
+        && !('basicSalary' in data)
+        && !('password' in data)
+        && data.employeeId == employeeId
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && data.dateOfBirth is string && data.dateOfBirth.size() >= 8 && data.dateOfBirth.size() <= 20
+        && data.gender in ['Male', 'Female', 'Other']
+        && data.mobile is string && data.mobile.size() >= 7 && data.mobile.size() <= 20
+        && data.joiningDate is string && data.joiningDate.size() >= 8 && data.joiningDate.size() <= 20
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.employmentType in ['Full-Time', 'Permanent', 'Contract', 'Part-Time', 'Temporary', 'Reliever']
+        && data.employeeStatus in ['Active', 'Inactive', 'On Leave', 'Suspended', 'Exited', 'Left']
+        && data.assignedDesignationIds is list && data.assignedDesignationIds.size() >= 1 && data.assignedDesignationIds.size() <= 20
+        && data.assignedDesignations is list && data.assignedDesignations.size() >= 1 && data.assignedDesignations.size() <= 20
+        && data.docVerificationSummary in ['No Documents', 'Pending', 'Verified', 'Rejected']
+        && data.isActive is bool
+        && data.isDeleted is bool;
+    }
+
+    function isValidEmployeePrivatePayload(data, employeeId) {
+      return (
+          ('employeeId' in data && data.employeeId == employeeId)
+          || ('uid' in data && data.uid == employeeId)
+        )
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && (!('salaryType' in data) || data.salaryType in ['Monthly', 'Daily', 'Hourly'])
+        && (!('basicSalary' in data) || (data.basicSalary is number && data.basicSalary >= 0));
+    }
+
+    function isValidEmployeeDocumentPayload(data, documentId) {
+      return data.keys().hasAll([
+          'documentId', 'employeeId', 'branchId', 'documentType', 'isSensitiveKyc',
+          'fileName', 'mimeType', 'fileSizeBytes', 'storagePath',
+          'uploadedAt', 'uploadedByUid', 'verificationStatus', 'updatedAt'
+        ])
+        && data.documentId == documentId
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.documentType in [
+          'Aadhaar Document', 'PAN Document', 'Photograph', 'Address Proof',
+          'Police Verification', 'Qualification Certificates', 'Training Certificates',
+          'Experience Certificates', 'Bank Proof', 'Other Documents'
+        ]
+        && data.isSensitiveKyc is bool
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 120
+        && data.fileSizeBytes is int && data.fileSizeBytes > 0 && data.fileSizeBytes <= 5 * 1024 * 1024
+        && data.verificationStatus in ['Pending', 'Verified', 'Rejected'];
+    }
+
+    function isValidEmployeeHistoryPayload(data, historyId) {
+      return data.keys().hasAll([
+          'historyId', 'employeeId', 'branchId', 'category',
+          'action', 'summary', 'actorUid', 'actorRole', 'timestamp'
+        ])
+        && data.historyId == historyId
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.category in ['Designation', 'SiteAssignment', 'Activity']
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 100
+        && data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 400
+        && data.actorUid == request.auth.uid
+        && isValidRoleValue(data.actorRole);
+    }
+
+    function isValidEmployeeAssignmentPayload(data, assignmentId) {
+      return data.keys().hasAll([
+          'assignmentId', 'employeeId', 'employeeName', 'linkedUid',
+          'branchId', 'branchName', 'clientId', 'clientName', 'siteId', 'siteName',
+          'siteServiceId', 'serviceCategory', 'serviceId', 'serviceName',
+          'designationId', 'designationName', 'shift', 'shiftStartTime', 'shiftEndTime',
+          'reportingTime', 'dutyHours', 'weeklyOff', 'startDate', 'endDate',
+          'reportingInstructions', 'remarks', 'assignmentStatus',
+          'previousAssignmentId', 'previousSiteId', 'previousSiteName',
+          'transferredToAssignmentId', 'transferredToSiteId', 'transferredToSiteName',
+          'assignedBy', 'assignedByRole', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && data.assignmentId == assignmentId
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 120
+        && data.linkedUid is string && data.linkedUid.size() <= 128
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 140
+        && isValidServiceCategory(data.serviceCategory)
+        && data.serviceId is string && data.serviceId.size() >= 1 && data.serviceId.size() <= 64
+        && data.designationId is string && data.designationId.size() >= 1 && data.designationId.size() <= 64
+        && data.shift is string && data.shift.size() >= 2 && data.shift.size() <= 80
+        && data.shiftStartTime is string && data.shiftStartTime.size() == 5
+        && data.shiftEndTime is string && data.shiftEndTime.size() == 5
+        && data.reportingTime is string && data.reportingTime.size() == 5
+        && data.dutyHours is number && data.dutyHours > 0 && data.dutyHours <= 16
+        && data.weeklyOff is string && data.weeklyOff.size() >= 2 && data.weeklyOff.size() <= 60
+        && data.startDate is string && data.startDate.size() == 10
+        && data.endDate is string && (data.endDate.size() == 0 || (data.endDate.size() == 10 && data.endDate >= data.startDate))
+        && data.reportingInstructions is string && data.reportingInstructions.size() <= 400
+        && data.remarks is string && data.remarks.size() <= 300
+        && data.assignmentStatus in ['Upcoming', 'Active', 'Completed', 'Transferred', 'Cancelled']
+        && isValidRoleValue(data.assignedByRole);
+    }
+
+    function isValidAssignmentHistoryPayload(data, historyId) {
+      return data.keys().hasAll([
+          'historyId', 'assignmentId', 'employeeId', 'employeeName', 'linkedUid',
+          'branchId', 'clientId', 'siteId', 'siteName', 'actionType',
+          'summary', 'remarks', 'actorUid', 'actorName', 'actorRole', 'timestamp'
+        ])
+        && data.historyId == historyId
+        && data.assignmentId is string && data.assignmentId.size() >= 1 && data.assignmentId.size() <= 64
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.actionType in [
+          'Employee Assigned', 'Employee Transferred', 'Assignment Modified',
+          'Assignment Ended', 'Assignment Cancelled', 'Field Officer Remark Added',
+          'Field Officer Action Requested', 'Approval Decision Recorded'
+        ]
+        && data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 400
+        && data.remarks is string && data.remarks.size() <= 300
+        && data.actorUid == request.auth.uid
+        && isValidRoleValue(data.actorRole);
+    }
+
+    function isValidManpowerShortagePayload(data, shortageId) {
+      return data.keys().hasAll([
+          'shortageId', 'siteId', 'siteName', 'clientId', 'clientName', 'branchId',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'shift', 'shortageCount', 'urgency', 'dateReportedFor', 'reason', 'status',
+          'reportedByUid', 'reportedByName', 'reportedByRole', 'resolutionRemarks',
+          'resolvedByName', 'createdAt', 'updatedAt'
+        ])
+        && data.shortageId == shortageId
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && isValidServiceCategory(data.serviceCategory)
+        && data.shortageCount is int && data.shortageCount >= 1 && data.shortageCount <= 500
+        && data.urgency in ['Low', 'Medium', 'High', 'Critical']
+        && data.status in ['Open', 'In Review', 'Resolved', 'Dismissed']
+        && data.reason is string && data.reason.size() >= 6 && data.reason.size() <= 400
+        && isValidRoleValue(data.reportedByRole);
+    }
+
+    function isValidSiteDeploymentSummaryPayload(data, siteId) {
+      return data.keys().hasAll([
+          'siteId', 'siteName', 'clientId', 'clientName', 'branchId',
+          'totalRequired', 'totalDeployed', 'totalVacant',
+          'totalActiveAssignments', 'totalUpcomingAssignments',
+          'lines', 'shiftBreakdown', 'updatedAt'
+        ])
+        // Strictly block employee PII, KYC, bank or salary fields in Site Portal summary
+        && !('employees' in data)
+        && !('employeeNames' in data)
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && data.siteId == siteId
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.totalRequired is int && data.totalRequired >= 0
+        && data.totalDeployed is int && data.totalDeployed >= 0
+        && data.totalVacant is int && data.totalVacant >= 0
+        && data.lines is list && data.lines.size() <= 200
+        && data.shiftBreakdown is list && data.shiftBreakdown.size() <= 100;
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Collection: users/{uid}
+    //    Protects user identity, role, branch, permissions, and site scope.
+    //    Site Managers & Employees CANNOT read other users' records.
+    // ------------------------------------------------------------------------
+    match /users/{uid} {
+      allow get: if isSignedIn()
+        && isValidId(uid)
+        && (
+          request.auth.uid == uid
+          || isAdmin()
+          || (isHR() && isAuthorizedForBranch(existing().branchId))
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(existing().branchId))
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(uid)
+        && isValidUserPayload(incoming(), uid)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasPermission('employee.manage')
+            && incoming().role == 'employee'
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(uid)
+        && isValidUserPayload(incoming(), uid)
+        && incoming().uid == existing().uid
+        && (
+          isAdmin()
+          || (
+            request.auth.uid == uid
+            && existing().isActive == true
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'updatedAt'])
+          )
+          || (
+            isHR()
+            && hasPermission('employee.manage')
+            && existing().role == 'employee'
+            && isAuthorizedForBranch(existing().branchId)
+            && incoming().role == 'employee'
+            && incoming().branchId == existing().branchId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'fullName', 'phone', 'assignedSiteIds', 'isActive', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(uid) && request.auth.uid != uid;
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Phase 3 Employee Collections:
+    //    - employees/{employeeId}         (Operational profile; NO Aadhaar/PAN/Bank/Salary)
+    //    - employeePrivate/{employeeId}   (Sensitive KYC/Bank/Salary; NEVER Site or Field Officer)
+    //    - employeeDocuments/{documentId} (KYC & Cert metadata; NEVER Site or Field Officer)
+    //    - employeeHistory/{historyId}    (Append-only Designation, Site & Activity trail)
+    //    Site Portal (`site`) has ZERO access to all Employee Management collections.
+    // ------------------------------------------------------------------------
+    match /employees/{employeeId} {
+      allow get: if isSignedIn()
+        && isValidId(employeeId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'employee.view', 'employee.create', 'employee.edit',
+              'employee.verify_docs', 'employee.delete', 'employee.manage',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().isDeleted == false
+            && (
+              isAuthorizedFieldOfficerBranch(existing().branchId)
+              || (existing().currentSiteId != '' && existing().currentSiteId in callerData().assignedSiteIds)
+              || existing().reportingFieldOfficerUid == request.auth.uid
+            )
+          )
+          || (
+            isEmployee()
+            && existing().isDeleted == false
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'employee.view', 'employee.create', 'employee.edit',
+              'employee.verify_docs', 'employee.delete', 'employee.manage',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().isDeleted == false
+            && (
+              isAuthorizedFieldOfficerBranch(existing().branchId)
+              || (existing().currentSiteId != '' && existing().currentSiteId in callerData().assignedSiteIds)
+              || existing().reportingFieldOfficerUid == request.auth.uid
+            )
+          )
+          || (
+            isEmployee()
+            && existing().isDeleted == false
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(employeeId)
+        && isValidEmployeePayload(incoming(), employeeId)
+        && incoming().isDeleted == false
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['employee.create', 'employee.manage'])
+            && isAuthorizedForBranch(incoming().branchId)
+            && (
+              incoming().assignedDesignations.size() <= 1
+              || hasAnyPermission(['employee.multi_designation', 'employee.manage'])
+            )
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(employeeId)
+        && isValidEmployeePayload(incoming(), employeeId)
+        && incoming().employeeId == existing().employeeId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'employee.edit', 'employee.verify_docs', 'employee.delete', 'employee.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForBranch(incoming().branchId)
+            && (
+              hasPermission('employee.delete')
+              || (existing().isDeleted == false && incoming().isDeleted == false)
+            )
+          )
+          || (
+            isHR()
+            && hasAnyPermission([
+              'assignment.create', 'assignment.edit', 'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+            && incoming().branchId == existing().branchId
+            && incoming().isDeleted == existing().isDeleted
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'currentSiteId', 'currentSiteName', 'updatedAt', 'updatedBy', 'serverUpdatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false; // Soft-delete only via isDeleted = true
+    }
+
+    match /employeePrivate/{employeeId} {
+      allow get: if isSignedIn()
+        && isValidId(employeeId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'employee.sensitive', 'employee.manage', 'payroll.view', 'payroll.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isEmployee()
+            && 'linkedUid' in existing()
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow list: if false; // Never allow bulk listing of sensitive Aadhaar/Bank/Salary records
+
+      allow create, update: if isSignedIn()
+        && isValidId(employeeId)
+        && isValidEmployeePrivatePayload(incoming(), employeeId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['employee.sensitive', 'employee.manage', 'payroll.manage'])
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /employeeDocuments/{documentId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(existing().branchId)
+            && (
+              existing().isSensitiveKyc == false
+                ? hasAnyPermission([
+                    'employee.view', 'employee.edit', 'employee.verify_docs', 'employee.manage'
+                  ])
+                : hasAnyPermission([
+                    'employee.sensitive', 'employee.verify_docs', 'employee.manage'
+                  ])
+            )
+          )
+          || (
+            isEmployee()
+            && existing().isSensitiveKyc == false
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(documentId)
+        && isValidEmployeeDocumentPayload(incoming(), documentId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(incoming().branchId)
+            && hasAnyPermission([
+              'employee.create', 'employee.edit', 'employee.verify_docs', 'employee.manage'
+            ])
+            && (
+              incoming().isSensitiveKyc == false
+              || hasAnyPermission(['employee.sensitive', 'employee.verify_docs', 'employee.manage'])
+            )
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(documentId)
+        && isValidEmployeeDocumentPayload(incoming(), documentId)
+        && incoming().documentId == existing().documentId
+        && incoming().employeeId == existing().employeeId
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(existing().branchId)
+            && hasAnyPermission(['employee.verify_docs', 'employee.manage'])
+          )
+        );
+
+      allow delete: if isSignedIn()
+        && isValidId(documentId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(existing().branchId)
+            && hasAnyPermission(['employee.verify_docs', 'employee.manage'])
+          )
+        );
+    }
+
+    match /employeeHistory/{historyId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'employee.view', 'employee.edit', 'employee.manage',
+              'assignment.view', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && (
+              isAuthorizedFieldOfficerBranch(existing().branchId)
+              || (
+                exists(/databases/$(database)/documents/employees/$(existing().employeeId))
+                && (
+                  get(/databases/$(database)/documents/employees/$(existing().employeeId)).data.currentSiteId in callerData().assignedSiteIds
+                  || get(/databases/$(database)/documents/employees/$(existing().employeeId)).data.reportingFieldOfficerUid == request.auth.uid
+                )
+              )
+            )
+          )
+          || (
+            isEmployee()
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(historyId)
+        && isValidEmployeeHistoryPayload(incoming(), historyId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(incoming().branchId)
+            && hasAnyPermission([
+              'employee.create', 'employee.edit', 'employee.verify_docs',
+              'employee.delete', 'employee.manage',
+              'assignment.create', 'assignment.edit', 'assignment.transfer', 'assignment.manage'
+            ])
+          )
+          || (
+            isFieldOfficer()
+            && incoming().category == 'SiteAssignment'
+            && isAuthorizedFieldOfficerBranch(incoming().branchId)
+          )
+        );
+
+      allow update, delete: if false; // Append-only history
+    }
+
+    // ------------------------------------------------------------------------
+    // 4B. Phase 3 Part 2 Deployment & Site Assignment Collections:
+    //     - employeeAssignments/{assignmentId}   (Zero Site Portal access; Employee self read-only)
+    //     - assignmentHistory/{historyId}        (Immutable append-only assignment log)
+    //     - manpowerShortages/{shortageId}       (Field Officer, HR & Admin shortage alerts)
+    //     - siteDeploymentSummaries/{siteId}     (Sanitized zero-PII Site Portal summary)
+    // ------------------------------------------------------------------------
+    match /employeeAssignments/{assignmentId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage', 'employee.view', 'employee.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+          )
+          || (
+            isEmployee()
+            && existing().linkedUid != ''
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(assignmentId)
+        && isValidEmployeeAssignmentPayload(incoming(), assignmentId)
+        && exists(/databases/$(database)/documents/employees/$(incoming().employeeId))
+        && get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.isDeleted == false
+        && get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.isActive == true
+        && get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.employeeStatus == 'Active'
+        && get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.docVerificationSummary != 'Rejected'
+        && incoming().designationId in get(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.assignedDesignationIds
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'assignment.create', 'assignment.transfer', 'assignment.manage', 'employee.manage'
+            ])
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && incoming().siteId in callerData().assignedSiteIds
+            && isAuthorizedFieldOfficerBranch(incoming().branchId)
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(assignmentId)
+        && isValidEmployeeAssignmentPayload(incoming(), assignmentId)
+        && incoming().assignmentId == existing().assignmentId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'assignment.edit', 'assignment.transfer', 'assignment.manage', 'employee.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+            && incoming().siteId == existing().siteId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'remarks', 'updatedBy', 'updatedAt', 'serverUpdatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false; // Never delete historical assignment records
+    }
+
+    match /assignmentHistory/{historyId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage', 'employee.view', 'employee.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+          )
+          || (
+            isEmployee()
+            && existing().linkedUid != ''
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(historyId)
+        && isValidAssignmentHistoryPayload(incoming(), historyId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && incoming().siteId in callerData().assignedSiteIds
+          )
+        );
+
+      allow update, delete: if false; // Append-only history
+    }
+
+    match /manpowerShortages/{shortageId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(shortageId)
+        && isValidManpowerShortagePayload(incoming(), shortageId)
+        && incoming().reportedByUid == request.auth.uid
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && incoming().siteId in callerData().assignedSiteIds
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(shortageId)
+        && isValidManpowerShortagePayload(incoming(), shortageId)
+        && incoming().shortageId == existing().shortageId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['assignment.edit', 'assignment.manage', 'site.edit'])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /siteDeploymentSummaries/{siteId} {
+      allow get: if isSignedIn()
+        && isValidId(siteId)
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(existing().branchId))
+          || (isFieldOfficer() && siteId in callerData().assignedSiteIds)
+          || (isSiteManager() && siteId in callerData().assignedSiteIds)
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(existing().branchId))
+          || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds)
+        );
+
+      allow create, update: if isSignedIn()
+        && isValidId(siteId)
+        && isValidSiteDeploymentSummaryPayload(incoming(), siteId)
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (
+            isFieldOfficer()
+            && siteId in callerData().assignedSiteIds
+            && isAuthorizedFieldOfficerBranch(incoming().branchId)
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Collection: branches/{branchId} (Admin Only Write; Scoped Read)
+    // ------------------------------------------------------------------------
+    match /branches/{branchId} {
+      allow get: if (hasActiveProfile() || isBootstrappedAdmin())
+        && isValidId(branchId)
+        && (isAuthorizedForBranch(branchId) || isAuthorizedFieldOfficerBranch(branchId));
+
+      allow list: if (hasActiveProfile() || isBootstrappedAdmin())
+        && (
+          isAdmin()
+          || isAuthorizedForBranch(existing().branchId)
+          || isAuthorizedFieldOfficerBranch(existing().branchId)
+        );
+
+      allow create: if isAdmin()
+        && isValidId(branchId)
+        && isValidBranchPayload(incoming(), branchId);
+
+      allow update: if isAdmin()
+        && isValidId(branchId)
+        && isValidBranchPayload(incoming(), branchId)
+        && incoming().branchId == existing().branchId;
+
+      allow delete: if false; // Soft-delete only (isDeleted = true) to preserve historical data
+    }
+
+    // ------------------------------------------------------------------------
+    // 5B. Collection: hrProfiles/{hrId} (Admin Only Management; Never Stores Passwords)
+    // ------------------------------------------------------------------------
+    match /hrProfiles/{hrId} {
+      allow get: if isValidId(hrId)
+        && (
+          isAdmin()
+          || (isHR() && (existing().uid == request.auth.uid || hasPermission('hr.view')))
+        );
+
+      allow list: if isAdmin()
+        || (isHR() && existing().uid == request.auth.uid);
+
+      allow create: if (isAdmin() || hasPermission('hr.manage'))
+        && isValidId(hrId)
+        && isValidHRProfilePayload(incoming(), hrId);
+
+      allow update: if (isAdmin() || hasPermission('hr.manage'))
+        && isValidId(hrId)
+        && isValidHRProfilePayload(incoming(), hrId)
+        && incoming().hrId == existing().hrId;
+
+      allow delete: if false; // Deactivate/suspend only
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Collection: clients/{clientId} (HR within Assigned Permissions & Admin All)
+    // ------------------------------------------------------------------------
+    match /clients/{clientId} {
+      allow get: if isValidId(clientId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'client.view', 'client.edit', 'clients:view', 'clients:edit',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().assignedBranch)
+          )
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && hasAnyPermission([
+            'client.view', 'client.edit', 'clients:view', 'clients:edit',
+            'assignment.view', 'assignment.create', 'assignment.edit',
+            'assignment.transfer', 'assignment.manage'
+          ])
+          && isAuthorizedForBranch(existing().assignedBranch)
+        );
+
+      allow create: if isValidId(clientId)
+        && hasAnyPermission(['client.create', 'clients:create'])
+        && isValidClientPayload(incoming(), clientId)
+        && isAuthorizedForBranch(incoming().assignedBranch);
+
+      allow update: if isValidId(clientId)
+        && hasAnyPermission(['client.edit', 'client.delete', 'clients:edit'])
+        && isValidClientPayload(incoming(), clientId)
+        && incoming().clientId == existing().clientId
+        && isAuthorizedForBranch(existing().assignedBranch)
+        && isAuthorizedForBranch(incoming().assignedBranch)
+        && (
+          isAdmin()
+          || hasPermission('client.delete')
+          || (
+            (!('isArchived' in existing()) || existing().isArchived == false)
+            && (!('isArchived' in incoming()) || incoming().isArchived == false)
+          )
+        );
+
+      allow delete: if false; // Archive only to preserve historical site & invoice links
+    }
+
+    // ------------------------------------------------------------------------
+    // 7. Collection: sites/{siteId}
+    //    HR can create/edit under existing Client within branch; Admin full control.
+    //    Site Portal & Field Officers can ONLY read sites in assignedSiteIds.
+    // ------------------------------------------------------------------------
+    match /sites/{siteId} {
+      allow get: if isValidId(siteId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'site.view', 'site.edit', 'sites:view', 'sites:edit',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || isAssignedToSite(siteId)
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && hasAnyPermission([
+            'site.view', 'site.edit', 'sites:view', 'sites:edit',
+            'assignment.view', 'assignment.create', 'assignment.edit',
+            'assignment.transfer', 'assignment.manage'
+          ])
+          && isAuthorizedForBranch(existing().branchId)
+        )
+        || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds);
+
+      allow create: if isValidId(siteId)
+        && hasAnyPermission(['site.create', 'sites:create'])
+        && isValidSitePayload(incoming(), siteId)
+        && isAuthorizedForBranch(incoming().branchId)
+        && exists(/databases/$(database)/documents/clients/$(incoming().clientId));
+
+      allow update: if isValidId(siteId)
+        && hasAnyPermission(['site.edit', 'site.delete', 'sites:edit'])
+        && isValidSitePayload(incoming(), siteId)
+        && incoming().siteId == existing().siteId
+        && isAuthorizedForBranch(existing().branchId)
+        && (
+          isAdmin()
+          || hasPermission('site.delete')
+          || (existing().isArchived == false && incoming().isArchived == false)
+        );
+
+      allow delete: if false; // Archive via isArchived = true to retain history
+    }
+
+    // ------------------------------------------------------------------------
+    // 7B. Collection: services/{serviceId}
+    //     Dynamic Security, Housekeeping & Manpower Service Master Catalog
+    // ------------------------------------------------------------------------
+    match /services/{serviceId} {
+      allow get: if isValidId(serviceId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'service.view', 'service.manage', 'site.view', 'site.create', 'site.edit',
+              'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && existing().status in ['Active', 'Inactive']
+          )
+          || isFieldOfficer()
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && hasAnyPermission([
+            'service.view', 'service.manage', 'site.view', 'site.create', 'site.edit',
+            'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
+            'assignment.view', 'assignment.create', 'assignment.edit',
+            'assignment.transfer', 'assignment.manage'
+          ])
+          && existing().status in ['Active', 'Inactive']
+        )
+        || isFieldOfficer();
+
+      allow create: if isSignedIn()
+        && isValidId(serviceId)
+        && isValidServicePayload(incoming(), serviceId)
+        && hasPermission('service.manage');
+
+      allow update: if isSignedIn()
+        && isValidId(serviceId)
+        && isValidServicePayload(incoming(), serviceId)
+        && incoming().serviceId == existing().serviceId
+        && incoming().createdAt == existing().createdAt
+        && hasPermission('service.manage')
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'serviceName', 'serviceCategory', 'serviceCode',
+            'description', 'status', 'updatedAt', 'serverUpdatedAt'
+          ])
+        );
+
+      allow delete: if false; // Activate / Deactivate only
+    }
+
+    // ------------------------------------------------------------------------
+    // 7C. Collection: designations/{designationId}
+    //     Extensible Designation Master linked to services/{serviceId}
+    // ------------------------------------------------------------------------
+    match /designations/{designationId} {
+      allow get: if isValidId(designationId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'designation.view', 'designation.manage', 'site.view', 'site.create', 'site.edit',
+              'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && existing().status in ['Active', 'Inactive']
+          )
+          || isFieldOfficer()
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && hasAnyPermission([
+            'designation.view', 'designation.manage', 'site.view', 'site.create', 'site.edit',
+            'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
+            'assignment.view', 'assignment.create', 'assignment.edit',
+            'assignment.transfer', 'assignment.manage'
+          ])
+          && existing().status in ['Active', 'Inactive']
+        )
+        || isFieldOfficer();
+
+      allow create: if isSignedIn()
+        && isValidId(designationId)
+        && isValidDesignationPayload(incoming(), designationId)
+        && hasPermission('designation.manage')
+        && existsAfter(/databases/$(database)/documents/services/$(incoming().relatedServiceId));
+
+      allow update: if isSignedIn()
+        && isValidId(designationId)
+        && isValidDesignationPayload(incoming(), designationId)
+        && incoming().designationId == existing().designationId
+        && incoming().createdAt == existing().createdAt
+        && hasPermission('designation.manage')
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'designationName', 'serviceCategory', 'relatedServiceId', 'relatedServiceName',
+            'description', 'requiredSkills', 'qualification', 'trainingRequirements',
+            'licenseRequirements', 'status', 'updatedAt', 'serverUpdatedAt'
+          ])
+        );
+
+      allow delete: if false; // Activate / Deactivate only
+    }
+
+    // ------------------------------------------------------------------------
+    // 7D. Collection: siteServices/{siteServiceId}
+    //     Multi-Service Site Configuration (Security, Housekeeping, Manpower)
+    //     Strictly enforces Vacant = Required - Deployed >= 0 (no negative vacancy)
+    // ------------------------------------------------------------------------
+    match /siteServices/{siteServiceId} {
+      allow get: if isValidId(siteServiceId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'site.view', 'site.edit', 'sites:view', 'sites:edit',
+              'assignment.view', 'assignment.create', 'assignment.edit',
+              'assignment.transfer', 'assignment.manage'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || isAssignedToSite(existing().siteId)
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && hasAnyPermission([
+            'site.view', 'site.edit', 'sites:view', 'sites:edit',
+            'assignment.view', 'assignment.create', 'assignment.edit',
+            'assignment.transfer', 'assignment.manage'
+          ])
+          && isAuthorizedForBranch(existing().branchId)
+        )
+        || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds);
+
+      allow create: if isSignedIn()
+        && isValidId(siteServiceId)
+        && isValidSiteServicePayload(incoming(), siteServiceId)
+        && hasAnyPermission(['site.edit', 'site.create', 'sites:edit', 'sites:create'])
+        && isAuthorizedForBranch(incoming().branchId)
+        && exists(/databases/$(database)/documents/sites/$(incoming().siteId));
+
+      allow update: if isSignedIn()
+        && isValidId(siteServiceId)
+        && isValidSiteServicePayload(incoming(), siteServiceId)
+        && incoming().siteServiceId == existing().siteServiceId
+        && incoming().siteId == existing().siteId
+        && incoming().branchId == existing().branchId
+        && incoming().createdAt == existing().createdAt
+        && hasAnyPermission(['site.edit', 'sites:edit'])
+        && isAuthorizedForBranch(existing().branchId)
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+            'requiredCount', 'deployedCount', 'vacantCount', 'shiftType', 'workingHours',
+            'weeklyOff', 'serviceStartDate', 'serviceEndDate', 'notes', 'status',
+            'updatedAt', 'serverUpdatedAt'
+          ])
+        );
+
+      allow delete: if isSignedIn()
+        && isValidId(siteServiceId)
+        && hasAnyPermission(['site.edit', 'sites:edit'])
+        && isAuthorizedForBranch(existing().branchId);
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. Operational Collections (Phase 1 Foundation Preserved)
+    // ------------------------------------------------------------------------
+    match /attendance/{recordId} {
+      allow get: if isValidId(recordId)
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+          || (isEmployee() && existing().employeeUid == request.auth.uid)
+        );
+
+      allow list: if isAdmin()
+        || (isHR() && isAuthorizedForBranch(existing().branchId))
+        || (isEmployee() && existing().employeeUid == request.auth.uid);
+
+      allow create: if isValidId(recordId)
+        && incoming().createdAt == request.time
+        && (
+          (isEmployee() && incoming().employeeUid == request.auth.uid)
+          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
+          || isAuthorizedForBranch(incoming().branchId)
+        );
+
+      allow update: if isValidId(recordId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (
+            isEmployee()
+            && existing().employeeUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['checkOutAt', 'status', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(recordId);
+    }
+
+    match /siteSummaries/{siteId} {
+      allow get: if isValidId(siteId) && isAssignedToSite(siteId);
+      allow list: if isAdmin()
+        || ((isSiteManager() || isFieldOfficer()) && existing().siteId in callerData().assignedSiteIds)
+        || (isHR() && isAuthorizedForBranch(existing().branchId));
+      allow create, update: if isValidId(siteId) && isAuthorizedForBranch(incoming().branchId);
+      allow delete: if isAdmin() && isValidId(siteId);
+    }
+
+    match /leaveRequests/{requestId} {
+      allow get: if isValidId(requestId)
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (isEmployee() && existing().employeeUid == request.auth.uid)
+        );
+      allow list: if isAdmin()
+        || (isHR() && isAuthorizedForBranch(existing().branchId))
+        || (isEmployee() && existing().employeeUid == request.auth.uid);
+      allow create: if isValidId(requestId)
+        && isEmployee()
+        && incoming().employeeUid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(requestId)
+        && existing().status == 'pending'
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isAuthorizedForBranch(existing().branchId);
+      allow delete: if isAdmin() && isValidId(requestId);
+    }
+
+    match /advanceRequests/{requestId} {
+      allow get: if isValidId(requestId)
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (isEmployee() && existing().employeeUid == request.auth.uid)
+        );
+      allow list: if isAdmin()
+        || (isHR() && isAuthorizedForBranch(existing().branchId))
+        || (isEmployee() && existing().employeeUid == request.auth.uid);
+      allow create: if isValidId(requestId)
+        && isEmployee()
+        && incoming().employeeUid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(requestId)
+        && existing().status == 'pending'
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isAuthorizedForBranch(existing().branchId);
+      allow delete: if isAdmin() && isValidId(requestId);
+    }
+
+    match /salarySlips/{slipId} {
+      allow get: if isValidId(slipId)
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (isEmployee() && existing().employeeUid == request.auth.uid)
+        );
+      allow list: if isAdmin()
+        || (isHR() && isAuthorizedForBranch(existing().branchId))
+        || (isEmployee() && existing().employeeUid == request.auth.uid);
+      allow create, update: if isValidId(slipId) && isAuthorizedForBranch(incoming().branchId);
+      allow delete: if isAdmin() && isValidId(slipId);
+    }
+
+    match /invoices/{invoiceId} {
+      allow get: if isValidId(invoiceId)
+        && (
+          isAuthorizedForBranch(existing().branchId)
+          || (isSiteManager() && existing().siteId in callerData().assignedSiteIds)
+        );
+      allow list: if isAdmin()
+        || (isHR() && isAuthorizedForBranch(existing().branchId))
+        || (isSiteManager() && existing().siteId in callerData().assignedSiteIds);
+      allow create, update: if isValidId(invoiceId) && isAuthorizedForBranch(incoming().branchId);
+      allow delete: if isAdmin() && isValidId(invoiceId);
+    }
+
+    // ------------------------------------------------------------------------
+    // 8B. Collection: approvals/{approvalId}
+    //     Sensitive HR Action Approval Workflow with Terminal State Locking
+    // ------------------------------------------------------------------------
+    match /approvals/{approvalId} {
+      allow get: if isValidId(approvalId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && (
+              existing().requestedByUid == request.auth.uid
+              || isAuthorizedForBranch(existing().branchId)
+            )
+          )
+          || (
+            isFieldOfficer()
+            && existing().requestedByUid == request.auth.uid
+          )
+        );
+
+      allow list: if isAdmin()
+        || (
+          isHR()
+          && (
+            existing().requestedByUid == request.auth.uid
+            || isAuthorizedForBranch(existing().branchId)
+          )
+        )
+        || (
+          isFieldOfficer()
+          && existing().requestedByUid == request.auth.uid
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(approvalId)
+        && isValidApprovalPayload(incoming(), approvalId)
+        && incoming().requestedByUid == request.auth.uid
+        && incoming().status == 'Pending'
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (
+            isFieldOfficer()
+            && incoming().module == 'Assignment'
+            && isAuthorizedFieldOfficerBranch(incoming().branchId)
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(approvalId)
+        && isValidApprovalPayload(incoming(), approvalId)
+        && existing().status == 'Pending'
+        && incoming().approvalId == existing().approvalId
+        && incoming().requestedByUid == existing().requestedByUid
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action 1: Admin Approve or Reject decision, OR authorized Branch HR reviewing Field Officer Assignment actions
+          (
+            (
+              isAdmin()
+              || (
+                isHR()
+                && existing().module == 'Assignment'
+                && existing().requestedByRole == 'field_officer'
+                && existing().requestedByUid != request.auth.uid
+                && hasAnyPermission(['assignment.manage', 'assignment.edit', 'employee.manage'])
+                && isAuthorizedForBranch(existing().branchId)
+              )
+            )
+            && incoming().status in ['Approved', 'Rejected']
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'reviewedByUid', 'reviewedByName',
+              'reviewRemarks', 'updatedAt', 'decidedAt', 'serverUpdatedAt'
+            ])
+          )
+          // Action 2: Requester or Admin Cancel pending request
+          || (
+            (
+              isAdmin()
+              || ((isHR() || isFieldOfficer()) && existing().requestedByUid == request.auth.uid)
+            )
+            && incoming().status == 'Cancelled'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'reviewRemarks', 'updatedAt', 'decidedAt', 'serverUpdatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false; // Preserve approval workflow history
+    }
+
+    // ------------------------------------------------------------------------
+    // 9. Collection: auditLogs/{logId}
+    //    Immutable Append-Only Audit Trail — HR Cannot Modify or Delete
+    // ------------------------------------------------------------------------
+    match /auditLogs/{logId} {
+      allow get, list: if isAdmin();
+
+      allow create: if (hasActiveProfile() || isBootstrappedAdmin())
+        && isValidId(logId)
+        && isValidAuditLogPayload(incoming());
+
+      allow update, delete: if false;
+    }
+  }
+}

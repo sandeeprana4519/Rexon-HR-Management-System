@@ -1,0 +1,187 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ------------------------------------------------------------------------
+    // Core Helpers — Cross-service lookup against Firestore users/{uid}
+    // ------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function isActiveUser() {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid))
+        && userDoc().data.isActive == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn()
+        && request.auth.token.email == 'sandeeprana4519@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (isActiveUser() && userDoc().data.role == 'admin');
+    }
+
+    function isHRForBranch(branchId) {
+      return isActiveUser()
+        && userDoc().data.role == 'hr'
+        && (
+          userDoc().data.branchId == branchId
+          || ('assignedBranches' in userDoc().data && branchId in userDoc().data.assignedBranches)
+        );
+    }
+
+    function hasAnyHRPermission(perms) {
+      return isAdmin()
+        || (
+          isActiveUser()
+          && userDoc().data.role == 'hr'
+          && 'permissions' in userDoc().data
+          && userDoc().data.permissions.hasAny(perms)
+        );
+    }
+
+    function isFieldOfficerForSite(siteId) {
+      return isActiveUser()
+        && userDoc().data.role == 'field_officer'
+        && siteId in userDoc().data.assignedSiteIds;
+    }
+
+    function isSiteManagerForSite(siteId) {
+      return isActiveUser()
+        && userDoc().data.role == 'site'
+        && siteId in userDoc().data.assignedSiteIds;
+    }
+
+    function isValidDocumentUpload() {
+      return request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('application/pdf|image/jpeg|image/png|image/webp');
+    }
+
+    function isValidPhotoUpload() {
+      return request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/jpeg|image/png|image/webp');
+    }
+
+    // ------------------------------------------------------------------------
+    // 1. Sensitive Employee KYC Documents (Aadhaar, PAN, Bank Proof, Police Verification)
+    //    Strictly restricted to Admin & authorized Branch HR.
+    //    NEVER public, NEVER Site Portal, NEVER Field Officer.
+    // ------------------------------------------------------------------------
+    match /employee_kyc/{branchId}/{employeeRef}/{fileName} {
+      allow read: if isAdmin()
+        || (
+          isHRForBranch(branchId)
+          && hasAnyHRPermission(['employee.sensitive', 'employee.verify_docs', 'employee.manage'])
+        );
+      allow create, update: if (
+          isAdmin()
+          || (
+            isHRForBranch(branchId)
+            && hasAnyHRPermission([
+              'employee.sensitive', 'employee.verify_docs', 'employee.manage'
+            ])
+          )
+        )
+        && isValidDocumentUpload();
+      allow delete: if isAdmin()
+        || (
+          isHRForBranch(branchId)
+          && hasAnyHRPermission(['employee.verify_docs', 'employee.manage'])
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. Authorized Employee Documents & Profile Photos
+    //    (Photograph, Address Proof, Qualification/Training/Experience Certs, Other)
+    //    Never public, never Site Portal.
+    // ------------------------------------------------------------------------
+    match /employee_documents/{branchId}/{employeeRef}/{fileName} {
+      allow read: if isAdmin()
+        || (
+          isHRForBranch(branchId)
+          && hasAnyHRPermission([
+            'employee.view', 'employee.create', 'employee.edit',
+            'employee.verify_docs', 'employee.manage'
+          ])
+        )
+        || (isActiveUser() && userDoc().data.role == 'employee' && request.auth.uid == employeeRef);
+      allow create, update: if (
+          isAdmin()
+          || (
+            isHRForBranch(branchId)
+            && hasAnyHRPermission([
+              'employee.create', 'employee.edit', 'employee.verify_docs', 'employee.manage'
+            ])
+          )
+        )
+        && isValidDocumentUpload();
+      allow delete: if isAdmin()
+        || (
+          isHRForBranch(branchId)
+          && hasAnyHRPermission(['employee.verify_docs', 'employee.manage'])
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Employee Salary Slips (PDF)
+    // ------------------------------------------------------------------------
+    match /salary_slips/{branchId}/{employeeUid}/{fileName} {
+      allow read: if isAdmin()
+        || isHRForBranch(branchId)
+        || (isActiveUser() && userDoc().data.role == 'employee' && request.auth.uid == employeeUid);
+      allow create, update: if (isAdmin() || isHRForBranch(branchId)) && isValidDocumentUpload();
+      allow delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Field Officer Inspection & Site Visit Photographs
+    // ------------------------------------------------------------------------
+    match /site_inspections/{siteId}/{visitId}/{fileName} {
+      allow read: if isAdmin()
+        || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+        || isFieldOfficerForSite(siteId);
+      allow create: if (isAdmin() || isFieldOfficerForSite(siteId)) && isValidPhotoUpload();
+      allow update, delete: if isAdmin();
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Client Site Invoices, Payment Receipts & Authorized Service Reports
+    // ------------------------------------------------------------------------
+    match /site_billing/{siteId}/{docType}/{fileName} {
+      allow read: if isAdmin()
+        || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+        || isSiteManagerForSite(siteId);
+      allow write: if (
+          isAdmin()
+          || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+        )
+        && isValidDocumentUpload();
+    }
+
+    // ------------------------------------------------------------------------
+    // 5B. HR Account Profile Photos (Admin Upload; Admin & HR Read)
+    // ------------------------------------------------------------------------
+    match /hr_profiles/{hrId}/{fileName} {
+      allow read: if isAdmin() || (isActiveUser() && userDoc().data.role == 'hr');
+      allow write: if isAdmin() && isValidPhotoUpload();
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Default Catch-All Deny
+    // ------------------------------------------------------------------------
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
