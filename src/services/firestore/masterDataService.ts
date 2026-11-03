@@ -71,6 +71,7 @@ import {
   firebaseStorage,
   firestoreDb,
   isFirebaseConfigured,
+  provisionFirebaseUserIsolated,
 } from '../firebase/config';
 import { handleFirestoreError } from './errorHandler';
 
@@ -1738,6 +1739,44 @@ export async function softDeleteBranchRecord(
 // ============================================================================
 // 2. HR ACCOUNT & GRANULAR PERMISSION MANAGEMENT (ADMIN ONLY)
 // ============================================================================
+async function compressImageToAvatarDataUrl(file: File): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read selected profile image.'));
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!dataUrl) {
+        resolve('');
+        return;
+      }
+      const img = new Image();
+      img.onerror = () => resolve(dataUrl);
+      img.onload = () => {
+        try {
+          const maxDim = 192;
+          const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+          const width = Math.max(1, Math.round(img.width * scale));
+          const height = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(dataUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.78));
+        } catch {
+          resolve(dataUrl);
+        }
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export async function uploadHRProfilePhoto(
   hrId: string,
   file: File,
@@ -1751,18 +1790,18 @@ export async function uploadHRProfilePhoto(
   }
 
   if (useLiveFirestore(isPreviewSession) && firebaseStorage) {
-    const storagePath = `hr_profiles/${hrId}/avatar_${Date.now()}`;
-    const storageRef = ref(firebaseStorage, storagePath);
-    await uploadBytes(storageRef, file, { contentType: file.type });
-    return await getDownloadURL(storageRef);
+    try {
+      const storagePath = `hr_profiles/${hrId}/avatar_${Date.now()}`;
+      const storageRef = ref(firebaseStorage, storagePath);
+      await uploadBytes(storageRef, file, { contentType: file.type });
+      return await getDownloadURL(storageRef);
+    } catch {
+      // Fallback to compact resized avatar if Firebase Storage bucket is not initialized yet
+      return await compressImageToAvatarDataUrl(file);
+    }
   }
 
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-    reader.onerror = () => reject(new Error('Failed to read selected profile image.'));
-    reader.readAsDataURL(file);
-  });
+  return await compressImageToAvatarDataUrl(file);
 }
 
 export async function listHRProfiles(
@@ -1794,11 +1833,17 @@ export interface CreateHRAccountOutcome {
   provisioningNote: string;
 }
 
+export interface CreateHRAccountAuthOptions {
+  initialPassword?: string;
+  existingAuthUid?: string;
+}
+
 export async function createHRProfileAccount(
   caller: RexonUser,
   isPreviewSession: boolean,
   input: HRProfileFormInput,
-  photoFile?: File | null
+  photoFile?: File | null,
+  authOptions?: CreateHRAccountAuthOptions
 ): Promise<CreateHRAccountOutcome> {
   if (caller.role !== 'admin') {
     throw new Error('Only Administrators can provision HR accounts.');
@@ -1826,46 +1871,69 @@ export async function createHRProfileAccount(
 
   let provisionedUid = `pending-auth-${hrId.toLowerCase()}`;
   let provisioningNote =
-    'Demo Mode: HR profile saved locally without storing any password. Connect Firebase + Backend Admin SDK to dispatch live Auth setup emails.';
+    'Demo Mode: HR profile saved locally without storing any password.';
 
-  if (useLiveFirestore(isPreviewSession) && firebaseAuth?.currentUser) {
-    const idToken = await firebaseAuth.currentUser.getIdToken();
-    const response = await fetch('/api/admin/hr-accounts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({
-        hrId,
-        fullName: sanitizeInput(input.fullName, 120),
-        email: sanitizeInput(input.email.toLowerCase(), 160),
-        mobile: sanitizeInput(input.mobile, 20),
-        assignedBranches: input.assignedBranches,
-        hrDesignation: input.hrDesignation,
-        permissionProfile: input.permissionProfile,
-        permissions,
-        joiningDate: input.joiningDate,
-        accountStatus: input.accountStatus,
-      }),
-    });
+  if (useLiveFirestore(isPreviewSession)) {
+    let backendProvisioned = false;
 
-    if (response.ok) {
-      const body = (await response.json()) as { uid?: string };
-      if (body.uid) {
-        provisionedUid = body.uid;
-      }
+    if (firebaseAuth?.currentUser) {
       try {
-        await sendPasswordResetEmail(firebaseAuth, input.email.trim());
-        provisioningNote = `Firebase Auth user provisioned via trusted backend (${provisionedUid}) and password-setup email dispatched to ${input.email.trim()}.`;
+        const idToken = await firebaseAuth.currentUser.getIdToken();
+        const response = await fetch('/api/admin/hr-accounts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            hrId,
+            fullName: sanitizeInput(input.fullName, 120),
+            email: sanitizeInput(input.email.toLowerCase(), 160),
+            mobile: sanitizeInput(input.mobile, 20),
+            assignedBranches: input.assignedBranches,
+            hrDesignation: input.hrDesignation,
+            permissionProfile: input.permissionProfile,
+            permissions,
+            joiningDate: input.joiningDate,
+            accountStatus: input.accountStatus,
+          }),
+        });
+
+        if (response.ok) {
+          const body = (await response.json()) as { uid?: string };
+          if (body.uid) {
+            provisionedUid = body.uid;
+            backendProvisioned = true;
+            try {
+              await sendPasswordResetEmail(firebaseAuth, input.email.trim());
+              provisioningNote = `Firebase Auth user provisioned via trusted backend (${provisionedUid}) and password-setup email dispatched to ${input.email.trim()}.`;
+            } catch {
+              provisioningNote = `Firebase Auth user provisioned (${provisionedUid}) via trusted backend.`;
+            }
+          }
+        }
       } catch {
-        provisioningNote = `Firebase Auth user provisioned (${provisionedUid}) via trusted backend.`;
+        // Proceed to isolated secondary FirebaseApp Auth provisioning
       }
-    } else {
-      const errBody = (await response.json().catch(() => ({}))) as { error?: string };
-      provisioningNote =
-        errBody.error ||
-        'HR Master Profile saved in Firestore. Configure server-side Cloud Function / Admin SDK to complete Firebase Auth user creation.';
+    }
+
+    if (!backendProvisioned) {
+      const isolatedResult = await provisionFirebaseUserIsolated({
+        email: input.email,
+        initialPassword: authOptions?.initialPassword,
+        existingAuthUid: authOptions?.existingAuthUid,
+      });
+      provisionedUid = isolatedResult.uid;
+
+      if (isolatedResult.mode === 'linked_existing') {
+        provisioningNote = `Linked existing Firebase Auth account (${provisionedUid}) and activated HR Portal access.`;
+      } else if ((authOptions?.initialPassword ?? '').trim().length >= 6) {
+        provisioningNote = `Firebase Auth account created (${provisionedUid}) and HR Portal login enabled immediately.`;
+      } else if (isolatedResult.passwordResetSent) {
+        provisioningNote = `Firebase Auth account created (${provisionedUid}) and password-setup email sent to ${input.email.trim()}.`;
+      } else {
+        provisioningNote = `Firebase Auth account created (${provisionedUid}). Use "Forgot Password?" on HR Portal to set a password.`;
+      }
     }
   }
 
@@ -1914,10 +1982,29 @@ export async function createHRProfileAccount(
   const path = `hrProfiles/${hrId}`;
   try {
     const batch = writeBatch(firestoreDb!);
+
+    if (provisionedUid && !provisionedUid.startsWith('pending-auth-')) {
+      batch.set(doc(firestoreDb!, 'users', provisionedUid), {
+        uid: provisionedUid,
+        fullName: sanitizeInput(input.fullName, 120),
+        email: sanitizeInput(input.email.toLowerCase(), 160),
+        phone: sanitizeInput(input.mobile, 20),
+        role: 'hr',
+        branchId: input.assignedBranches[0],
+        assignedBranches: input.assignedBranches,
+        assignedSiteIds: [],
+        permissions,
+        isActive: input.accountStatus === 'Active',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+
     batch.set(doc(firestoreDb!, 'hrProfiles', hrId), {
       ...record,
       serverUpdatedAt: serverTimestamp(),
     });
+
     const logId = makeRuntimeLogId();
     batch.set(doc(firestoreDb!, 'auditLogs', logId), {
       ...buildAuditLogObject(caller, {
@@ -1925,11 +2012,12 @@ export async function createHRProfileAccount(
         action: 'HR Created',
         module: 'HR',
         recordId: hrId,
-        branchId: input.assignedBranches[0] || caller.branchId,
+        branchId: input.assignedBranches[0] || caller.branchId || 'HQ',
         summary,
       }),
       createdAt: serverTimestamp(),
     });
+
     await batch.commit();
     notifyListeners();
     return { record, provisioningNote };

@@ -1,10 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertCircle,
+  Building2,
   Camera,
   CheckCircle2,
   Edit3,
   Eye,
+  EyeOff,
+  KeyRound,
+  Lock,
   Plus,
   ShieldCheck,
   UserCheck,
@@ -20,6 +25,7 @@ import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
 import { formatServiceErrorMessage } from '../../services/firestore/errorHandler';
 import {
+  createBranchRecord,
   createHRProfileAccount,
   listBranches,
   listHRProfiles,
@@ -62,7 +68,8 @@ function getInitials(name: string): string {
 }
 
 export const HRManagementPage: React.FC = () => {
-  const { user, isPreviewSession } = useAuth();
+  const { user, isFirebaseConfigured, isPreviewSession } = useAuth();
+  const isLiveFirebase = isFirebaseConfigured && !isPreviewSession;
 
   const [hrProfiles, setHrProfiles] = useState<HRProfileRecord[]>([]);
   const [branches, setBranches] = useState<BranchRecord[]>([]);
@@ -79,10 +86,15 @@ export const HRManagementPage: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingHR, setEditingHR] = useState<HRProfileRecord | null>(null);
   const [formData, setFormData] = useState<HRProfileFormInput>(INITIAL_HR_FORM);
+  const [initialPassword, setInitialPassword] = useState<string>('');
+  const [showInitialPassword, setShowInitialPassword] = useState<boolean>(false);
+  const [showExistingUidField, setShowExistingUidField] = useState<boolean>(false);
+  const [existingAuthUid, setExistingAuthUid] = useState<string>('');
   const [selectedPhotoFile, setSelectedPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string>('');
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [creatingQuickBranch, setCreatingQuickBranch] = useState(false);
 
   // Detail View & Status Confirmation
   const [viewingHR, setViewingHR] = useState<HRProfileRecord | null>(null);
@@ -174,6 +186,10 @@ export const HRManagementPage: React.FC = () => {
       ...INITIAL_HR_FORM,
       assignedBranches: defaultBranch ? [defaultBranch] : [],
     });
+    setInitialPassword('');
+    setShowInitialPassword(false);
+    setShowExistingUidField(false);
+    setExistingAuthUid('');
     setSelectedPhotoFile(null);
     setPhotoPreviewUrl('');
     setFormError(null);
@@ -193,10 +209,65 @@ export const HRManagementPage: React.FC = () => {
       joiningDate: hr.joiningDate,
       accountStatus: hr.accountStatus,
     });
+    setInitialPassword('');
+    setShowInitialPassword(false);
+    setShowExistingUidField(false);
+    setExistingAuthUid('');
     setSelectedPhotoFile(null);
     setPhotoPreviewUrl(hr.profilePhoto || '');
     setFormError(null);
     setModalOpen(true);
+  };
+
+  const handleQuickCreateDefaultBranch = async () => {
+    if (!user) return;
+    setCreatingQuickBranch(true);
+    setFormError(null);
+    try {
+      const validAdminPhone =
+        user.phone && user.phone.replace(/\D/g, '').length >= 10
+          ? user.phone
+          : '+91 98201 10001';
+      const validAdminEmail =
+        user.email && user.email.includes('@')
+          ? user.email
+          : 'mumbai.hq@rexonsecurity.com';
+      const validManagerName =
+        user.fullName && user.fullName.trim().length >= 2 ? user.fullName.trim() : 'Admin Manager';
+
+      const created = await createBranchRecord(user, isPreviewSession, {
+        branchName: 'Mumbai Corporate & Western Command',
+        branchCode: 'MUM-HQ',
+        managerName: validManagerName,
+        mobile: validAdminPhone,
+        email: validAdminEmail,
+        address: '402, Heritage Corporate Plaza, Andheri East',
+        city: 'Mumbai',
+        state: 'Maharashtra',
+        pinCode: '400069',
+        status: 'Active',
+      });
+      await loadData();
+      setFormData((prev) => ({
+        ...prev,
+        assignedBranches: prev.assignedBranches.includes(created.branchId)
+          ? prev.assignedBranches
+          : [...prev.assignedBranches, created.branchId],
+      }));
+      setBanner({
+        type: 'success',
+        text: `Default HQ Branch (${created.branchCode} — ${created.branchName}) created and ready for HR assignment.`,
+      });
+    } catch (err) {
+      const msg = formatServiceErrorMessage(err);
+      if (modalOpen) {
+        setFormError(msg);
+      } else {
+        setBanner({ type: 'error', text: msg });
+      }
+    } finally {
+      setCreatingQuickBranch(false);
+    }
   };
 
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -251,11 +322,25 @@ export const HRManagementPage: React.FC = () => {
           text: `HR account ${editingHR.hrId} (${formData.fullName}) updated.`,
         });
       } else {
+        if (
+          isLiveFirebase &&
+          initialPassword.trim().length > 0 &&
+          initialPassword.trim().length < 6
+        ) {
+          setFormError('Initial Login Password must be at least 6 characters long.');
+          setSaving(false);
+          return;
+        }
+
         const { record, provisioningNote } = await createHRProfileAccount(
           user,
           isPreviewSession,
           formData,
-          selectedPhotoFile
+          selectedPhotoFile,
+          {
+            initialPassword: initialPassword.trim(),
+            existingAuthUid: existingAuthUid.trim(),
+          }
         );
         setBanner({
           type: 'success',
@@ -316,16 +401,54 @@ export const HRManagementPage: React.FC = () => {
         </button>
       </div>
 
-      {/* Zero Plain-Text Password & Backend Provisioning Notice */}
+      {/* Zero Plain-Text Password & Provisioning Notice */}
       <div className="p-4 rounded-xl bg-[#F3EDE4] border border-[#D4C7B8] flex items-start gap-3 text-xs text-[#4A3023]">
         <ShieldCheck className="w-4 h-4 text-[#5C3D2E] shrink-0 mt-0.5" />
         <div>
-          <strong className="text-[#1F1916]">Privileged Firebase Auth Security:</strong> Plain-text
-          passwords are never accepted or stored in Firestore. Privileged HR creation routes through
-          the trusted backend (<code className="font-mono-tabular">/api/admin/hr-accounts</code> /
-          Cloud Function) and dispatches a Firebase Authentication password-setup email link.
+          <strong className="text-[#1F1916]">Firebase Auth &amp; Role Provisioning:</strong>{' '}
+          Plain-text passwords are never stored in Firestore. Creating an HR account provisions
+          their Firebase Authentication login and writes their verified{' '}
+          <code className="font-mono-tabular">users/&#123;uid&#125;</code> role &amp; branch
+          permissions atomically so they can sign in to the HR Portal immediately.
         </div>
       </div>
+
+      {/* Zero-Branch Setup Callout on Fresh Database */}
+      {!loading && branches.length === 0 && (
+        <div className="p-4 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 text-xs text-[#92400E]">
+          <div className="flex items-start gap-3">
+            <Building2 className="w-4 h-4 text-[#B45309] shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-[#78350F]">
+                Step 1 Required: Create at least one Operational Branch first
+              </p>
+              <p className="mt-0.5">
+                Every HR officer must be scoped to one or more Branches. Create your HQ branch in
+                one click below or open Branch Management.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={creatingQuickBranch}
+              onClick={() => void handleQuickCreateDefaultBranch()}
+              className="min-h-[38px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-60 transition-colors whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>
+                {creatingQuickBranch ? 'Creating HQ Branch...' : 'Quick-Create HQ Branch (MUM-HQ)'}
+              </span>
+            </button>
+            <Link
+              to="/admin/branches"
+              className="min-h-[38px] inline-flex items-center px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#FAF8F5] whitespace-nowrap"
+            >
+              Open Branch Management
+            </Link>
+          </div>
+        </div>
+      )}
 
       {banner && (
         <div
@@ -758,15 +881,115 @@ export const HRManagementPage: React.FC = () => {
                 </span>
               </div>
 
+              {/* Live Firebase Auth Login Setup (Only when creating a new HR account) */}
+              {!editingHR && isLiveFirebase && (
+                <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#D4C7B8] space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-[#1F1916]">
+                      <KeyRound className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                      <span>HR Portal Login Password (Firebase Authentication)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInitialPassword('Rexon@123');
+                        setShowInitialPassword(true);
+                      }}
+                      className="min-h-[30px] px-2.5 py-1 rounded-md bg-white border border-[#D4C7B8] text-[11px] font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4]"
+                    >
+                      Use Default (Rexon@123)
+                    </button>
+                  </div>
+
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-[#7D6F65] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type={showInitialPassword ? 'text' : 'password'}
+                      value={initialPassword}
+                      onChange={(e) => setInitialPassword(e.target.value)}
+                      placeholder="Set initial password (min 6 chars) or leave blank for reset email"
+                      autoComplete="new-password"
+                      className="w-full min-h-[42px] pl-10 pr-11 py-2 text-sm bg-white border border-[#E5DDD2] rounded-lg focus:outline-none focus:border-[#5C3D2E]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowInitialPassword((prev) => !prev)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[34px] min-w-[34px] flex items-center justify-center text-[#7D6F65] hover:text-[#1F1916]"
+                      aria-label={showInitialPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showInitialPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#574B43]">
+                    <span>
+                      Sent directly to Firebase Auth only — never saved in Firestore.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowExistingUidField((prev) => !prev)}
+                      className="font-semibold text-[#5C3D2E] hover:underline"
+                    >
+                      {showExistingUidField
+                        ? 'Hide Existing Auth UID'
+                        : 'Already added in Firebase Console? Link UID'}
+                    </button>
+                  </div>
+
+                  {showExistingUidField && (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#1F1916] mb-1">
+                        Existing Firebase Auth User UID (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={existingAuthUid}
+                        onChange={(e) => setExistingAuthUid(e.target.value)}
+                        placeholder="Paste Firebase Auth UID only if email already exists in Console"
+                        className="w-full min-h-[38px] px-3 py-1.5 text-xs font-mono-tabular bg-white border border-[#E5DDD2] rounded-lg focus:outline-none focus:border-[#5C3D2E]"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Assigned Branches Multi-Select */}
               <div>
                 <label className="block text-xs font-semibold text-[#1F1916] mb-2">
                   Assigned Branches (Select one or more) *
                 </label>
                 {branches.length === 0 ? (
-                  <p className="text-xs text-[#B91C1C]">
-                    Create at least one Branch in Branch Management before assigning HR officers.
-                  </p>
+                  <div className="p-3.5 rounded-lg bg-[#FFFBEB] border border-[#FDE68A] space-y-2.5">
+                    <p className="text-xs font-medium text-[#92400E]">
+                      No Branch exists yet. Create a Branch below to assign this HR officer:
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={creatingQuickBranch}
+                        onClick={() => void handleQuickCreateDefaultBranch()}
+                        className="min-h-[38px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-60"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>
+                          {creatingQuickBranch
+                            ? 'Creating HQ Branch...'
+                            : 'Quick-Create HQ Branch (MUM-HQ)'}
+                        </span>
+                      </button>
+                      <Link
+                        to="/admin/branches"
+                        onClick={() => setModalOpen(false)}
+                        className="min-h-[38px] inline-flex items-center px-3 py-1.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#FAF8F5]"
+                      >
+                        Go to Branch Management
+                      </Link>
+                    </div>
+                  </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {branches.map((branch) => {

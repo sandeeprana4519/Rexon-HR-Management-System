@@ -57,6 +57,12 @@ export function formatServiceErrorMessage(error: unknown): string {
   if (msg.includes('auth/configuration-not-found') || msg.includes('auth/operation-not-allowed')) {
     return 'Email/Password sign-in is not enabled yet. In Firebase Console, open Build → Authentication → Sign-in method and enable Email/Password.';
   }
+  if (msg.includes('auth/weak-password')) {
+    return 'Password is too weak. Please enter at least 6 characters.';
+  }
+  if (msg.includes('auth/email-already-in-use')) {
+    return 'This email is already registered in Firebase Authentication. Enter its matching password or link its existing Auth UID.';
+  }
   if (msg.includes('auth/invalid-credential') || msg.includes('auth/wrong-password') || msg.includes('auth/user-not-found')) {
     return 'Invalid email address or password. Verify your credentials and try again.';
   }
