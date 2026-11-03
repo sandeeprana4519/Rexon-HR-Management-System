@@ -61,6 +61,31 @@ service firebase.storage {
         && siteId in userDoc().data.assignedSiteIds;
     }
 
+    function isHRAuthorizedForSite(siteId) {
+      return isActiveUser()
+        && userDoc().data.role == 'hr'
+        && (
+          ('assignedSiteIds' in userDoc().data && siteId in userDoc().data.assignedSiteIds)
+          || (
+            firestore.exists(/databases/(default)/documents/sites/$(siteId))
+            && isHRForBranch(firestore.get(/databases/(default)/documents/sites/$(siteId)).data.branchId)
+          )
+        );
+    }
+
+    function isEmployeeOwnerOfRef(employeeRef) {
+      return isActiveUser()
+        && userDoc().data.role == 'employee'
+        && (
+          request.auth.uid == employeeRef
+          || (
+            firestore.exists(/databases/(default)/documents/employees/$(employeeRef))
+            && firestore.get(/databases/(default)/documents/employees/$(employeeRef)).data.isDeleted == false
+            && firestore.get(/databases/(default)/documents/employees/$(employeeRef)).data.linkedUid == request.auth.uid
+          )
+        );
+    }
+
     function isValidDocumentUpload() {
       return request.resource != null
         && request.resource.size <= 5 * 1024 * 1024
@@ -115,7 +140,7 @@ service firebase.storage {
             'employee.verify_docs', 'employee.manage'
           ])
         )
-        || (isActiveUser() && userDoc().data.role == 'employee' && request.auth.uid == employeeRef);
+        || isEmployeeOwnerOfRef(employeeRef);
       allow create, update: if (
           isAdmin()
           || (
@@ -149,7 +174,7 @@ service firebase.storage {
     // ------------------------------------------------------------------------
     match /site_inspections/{siteId}/{visitId}/{fileName} {
       allow read: if isAdmin()
-        || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+        || isHRAuthorizedForSite(siteId)
         || isFieldOfficerForSite(siteId);
       allow create: if (isAdmin() || isFieldOfficerForSite(siteId)) && isValidPhotoUpload();
       allow update, delete: if isAdmin();
@@ -160,11 +185,11 @@ service firebase.storage {
     // ------------------------------------------------------------------------
     match /site_billing/{siteId}/{docType}/{fileName} {
       allow read: if isAdmin()
-        || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+        || isHRAuthorizedForSite(siteId)
         || isSiteManagerForSite(siteId);
       allow write: if (
           isAdmin()
-          || (isActiveUser() && userDoc().data.role == 'hr' && siteId in userDoc().data.assignedSiteIds)
+          || (isHRAuthorizedForSite(siteId) && hasAnyHRPermission(['billing.manage', 'site.edit']))
         )
         && isValidDocumentUpload();
     }

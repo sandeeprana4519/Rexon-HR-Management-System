@@ -21,6 +21,11 @@ import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
 import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
+import {
+  listAttendanceCorrectionRequests,
+  listAttendanceRecords,
+  subscribeAttendanceData,
+} from '../../services/firestore/attendanceService';
 import { listEmployees, subscribeEmployeeData } from '../../services/firestore/employeeService';
 import {
   listApprovalRequests,
@@ -102,6 +107,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
   });
   const [employees, setEmployees] = useState<EmployeeRecord[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequestRecord[]>([]);
+  const [pendingAttendanceCount, setPendingAttendanceCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -118,16 +124,30 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
   const [submissionNotice, setSubmissionNotice] = useState<string | null>(null);
 
   const canViewEmployees = hasUserPermission(user, 'employee.view');
+  const canViewAttendance =
+    hasUserPermission(user, 'attendance.view') ||
+    hasUserPermission(user, 'attendance.verify') ||
+    hasUserPermission(user, 'attendance.correct');
+  const canViewRosters =
+    hasUserPermission(user, 'roster.view') ||
+    hasUserPermission(user, 'roster.create') ||
+    hasUserPermission(user, 'roster.edit');
 
   const loadDashboardData = useCallback(async () => {
     if (!user) return;
     setLoading(true);
     try {
-      const [clientList, siteList, empList, approvalList] = await Promise.all([
+      const [clientList, siteList, empList, approvalList, attList, corrList] = await Promise.all([
         listClients(user, isPreviewSession),
         listSites(user, isPreviewSession),
         canViewEmployees ? listEmployees(user, isPreviewSession) : Promise.resolve([]),
         listApprovalRequests(user, isPreviewSession),
+        canViewAttendance
+          ? listAttendanceRecords(user, isPreviewSession).catch(() => [])
+          : Promise.resolve([]),
+        canViewAttendance
+          ? listAttendanceCorrectionRequests(user, isPreviewSession).catch(() => [])
+          : Promise.resolve([]),
       ]);
       setMasterCounts({
         clients: clientList.filter((c) => !c.isArchived).length,
@@ -135,6 +155,9 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
       });
       setEmployees(empList.filter((e) => !e.isDeleted));
       setApprovals(approvalList);
+      const unverifiedAtt = attList.filter((a) => !a.isVerifiedByHr).length;
+      const pendingCorr = corrList.filter((c) => c.status === 'Pending').length;
+      setPendingAttendanceCount(unverifiedAtt + pendingCorr);
 
       if (isFirebaseConfigured && !isPreviewSession) {
         const res = await fetchLivePortalMetrics(user);
@@ -145,7 +168,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
     } finally {
       setLoading(false);
     }
-  }, [user, canViewEmployees, isFirebaseConfigured, isPreviewSession]);
+  }, [user, canViewEmployees, canViewAttendance, isFirebaseConfigured, isPreviewSession]);
 
   useEffect(() => {
     void loadDashboardData();
@@ -155,9 +178,13 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
     const unsubEmp = subscribeEmployeeData(() => {
       void loadDashboardData();
     });
+    const unsubAtt = subscribeAttendanceData(() => {
+      void loadDashboardData();
+    });
     return () => {
       unsubMaster();
       unsubEmp();
+      unsubAtt();
     };
   }, [loadDashboardData]);
 
@@ -194,12 +221,12 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
       totalEmployees: employees.length,
       activeEmployees: activeEmpCount,
       newJoining: joinedThisMonth,
-      attendancePending: 0,
+      attendancePending: pendingAttendanceCount,
       leaveRequests: metrics.leaveRequestsCount,
       advanceRequests: metrics.advanceRequestsCount,
       pendingApprovals: pendingApprovalsCount,
     };
-  }, [useSample, employees, metrics, masterCounts, pendingApprovalsCount]);
+  }, [useSample, employees, metrics, masterCounts, pendingApprovalsCount, pendingAttendanceCount]);
 
   const combinedQueue = useMemo(() => {
     const liveApprovalItems: HRQueueItem[] = approvals.map((a) => ({
@@ -446,6 +473,30 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
             >
               <span className="truncate">Employee Management</span>
               <Users className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            </button>
+          )}
+
+          {canViewRosters && (
+            <button
+              type="button"
+              onClick={() => navigate('/hr/rosters')}
+              className="min-h-[48px] flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-white border border-[#D4C7B8] text-left text-xs font-semibold text-[#1F1916] hover:border-[#5C3D2E] transition-colors whitespace-nowrap"
+            >
+              <span className="truncate">Duty Roster Management</span>
+              <CalendarClock className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            </button>
+          )}
+
+          {canViewAttendance && (
+            <button
+              type="button"
+              onClick={() => navigate('/hr/attendance')}
+              className="min-h-[48px] flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-white border border-[#D4C7B8] text-left text-xs font-semibold text-[#1F1916] hover:border-[#5C3D2E] transition-colors whitespace-nowrap"
+            >
+              <span className="truncate">
+                Attendance &amp; Verification ({pendingAttendanceCount})
+              </span>
+              <ClipboardCheck className="w-4 h-4 text-[#5C3D2E] shrink-0" />
             </button>
           )}
 

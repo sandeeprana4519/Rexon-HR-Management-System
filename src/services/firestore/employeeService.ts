@@ -682,9 +682,30 @@ export async function createEmployeeRecord(
   }
 
   // Generate unique Employee ID across all existing records (including soft-deleted)
-  let existingIds: string[] = [];
+  // and prevent duplicate active employees (mobile, email, Aadhaar, PAN)
+  let existingEmployees: EmployeeRecord[] = [];
   if (!useLiveFirestore(isPreviewSession)) {
-    existingIds = readLocalEmployeeStore().employees.map((e) => e.employeeId);
+    const localStore = readLocalEmployeeStore();
+    existingEmployees = localStore.employees;
+    if (input.includePrivateFinancials) {
+      const cleanAadhaarCheck = input.aadhaarNumber.replace(/[\s-]/g, '');
+      const cleanPanCheck = input.panNumber.trim().toUpperCase();
+      for (const emp of existingEmployees) {
+        if (emp.isDeleted) continue;
+        const priv = localStore.employeePrivate[emp.employeeId];
+        if (!priv) continue;
+        if (cleanAadhaarCheck && priv.aadhaarNumber === cleanAadhaarCheck) {
+          throw new Error(
+            `Duplicate prevented: Aadhaar number is already registered to active employee ${emp.fullName} (${emp.employeeId}).`
+          );
+        }
+        if (cleanPanCheck && priv.panNumber.toUpperCase() === cleanPanCheck) {
+          throw new Error(
+            `Duplicate prevented: PAN "${cleanPanCheck}" is already registered to active employee ${emp.fullName} (${emp.employeeId}).`
+          );
+        }
+      }
+    }
   } else {
     const existingSnap = await getDocs(
       caller.role === 'admin'
@@ -694,9 +715,31 @@ export async function createEmployeeRecord(
             where('branchId', 'in', getAuthorizedBranchIds(caller).slice(0, 10))
           )
     );
-    existingIds = existingSnap.docs.map((d) => d.id);
+    existingEmployees = existingSnap.docs.map((d) => d.data() as EmployeeRecord);
   }
 
+  const normalizedPhone = input.mobile.replace(/\D/g, '').slice(-10);
+  const normalizedEmail = input.email.trim().toLowerCase();
+  const duplicateMobile = existingEmployees.find(
+    (e) => !e.isDeleted && e.mobile.replace(/\D/g, '').slice(-10) === normalizedPhone
+  );
+  if (duplicateMobile) {
+    throw new Error(
+      `Duplicate prevented: Mobile number ${input.mobile.trim()} is already registered to ${duplicateMobile.fullName} (${duplicateMobile.employeeId}).`
+    );
+  }
+  if (normalizedEmail) {
+    const duplicateEmail = existingEmployees.find(
+      (e) => !e.isDeleted && e.email && e.email.trim().toLowerCase() === normalizedEmail
+    );
+    if (duplicateEmail) {
+      throw new Error(
+        `Duplicate prevented: Email "${normalizedEmail}" is already registered to ${duplicateEmail.fullName} (${duplicateEmail.employeeId}).`
+      );
+    }
+  }
+
+  const existingIds = existingEmployees.map((e) => e.employeeId);
   let employeeId = generateSequentialId('EMP', existingIds);
   if (useLiveFirestore(isPreviewSession)) {
     const collisionCheck = await getDoc(doc(firestoreDb!, 'employees', employeeId));
@@ -947,6 +990,57 @@ export async function updateEmployeeRecord(
     : undefined;
   if (input.currentSiteId && !siteObj) {
     throw new Error('Selected Deployment Site could not be found.');
+  }
+
+  const peerEmployees = !useLiveFirestore(isPreviewSession)
+    ? readLocalEmployeeStore().employees
+    : await listEmployees(caller, isPreviewSession);
+  const normalizedPhone = input.mobile.replace(/\D/g, '').slice(-10);
+  const normalizedEmail = input.email.trim().toLowerCase();
+  const duplicateMobile = peerEmployees.find(
+    (e) =>
+      !e.isDeleted &&
+      e.employeeId !== employeeId &&
+      e.mobile.replace(/\D/g, '').slice(-10) === normalizedPhone
+  );
+  if (duplicateMobile) {
+    throw new Error(
+      `Duplicate prevented: Mobile number ${input.mobile.trim()} is already registered to ${duplicateMobile.fullName} (${duplicateMobile.employeeId}).`
+    );
+  }
+  if (normalizedEmail) {
+    const duplicateEmail = peerEmployees.find(
+      (e) =>
+        !e.isDeleted &&
+        e.employeeId !== employeeId &&
+        e.email &&
+        e.email.trim().toLowerCase() === normalizedEmail
+    );
+    if (duplicateEmail) {
+      throw new Error(
+        `Duplicate prevented: Email "${normalizedEmail}" is already registered to ${duplicateEmail.fullName} (${duplicateEmail.employeeId}).`
+      );
+    }
+  }
+  if (!useLiveFirestore(isPreviewSession) && input.includePrivateFinancials) {
+    const localStore = readLocalEmployeeStore();
+    const cleanAadhaarCheck = input.aadhaarNumber.replace(/[\s-]/g, '');
+    const cleanPanCheck = input.panNumber.trim().toUpperCase();
+    for (const emp of localStore.employees) {
+      if (emp.isDeleted || emp.employeeId === employeeId) continue;
+      const priv = localStore.employeePrivate[emp.employeeId];
+      if (!priv) continue;
+      if (cleanAadhaarCheck && priv.aadhaarNumber === cleanAadhaarCheck) {
+        throw new Error(
+          `Duplicate prevented: Aadhaar number is already registered to active employee ${emp.fullName} (${emp.employeeId}).`
+        );
+      }
+      if (cleanPanCheck && priv.panNumber.toUpperCase() === cleanPanCheck) {
+        throw new Error(
+          `Duplicate prevented: PAN "${cleanPanCheck}" is already registered to active employee ${emp.fullName} (${emp.employeeId}).`
+        );
+      }
+    }
   }
 
   const nowIso = new Date().toISOString();

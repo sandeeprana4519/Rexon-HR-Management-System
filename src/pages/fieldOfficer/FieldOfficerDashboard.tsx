@@ -2,12 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowRightLeft,
+  CalendarClock,
   CheckCircle2,
   ClipboardCheck,
   Clock,
   FileWarning,
   MapPin,
   Plus,
+  QrCode,
   Users,
   X,
 } from 'lucide-react';
@@ -195,8 +197,26 @@ export const FieldOfficerDashboard: React.FC<FieldOfficerDashboardProps> = ({
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
           <button
             type="button"
+            onClick={() => navigate('/field-officer/rosters')}
+            className="min-h-[44px] inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+          >
+            <CalendarClock className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            <span>Duty Rosters</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate('/field-officer/attendance')}
+            className="min-h-[44px] inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+          >
+            <QrCode className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            <span>Attendance &amp; QR</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => navigate('/field-officer/assignments')}
-            className="min-h-[44px] inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+            className="min-h-[44px] inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
           >
             <ArrowRightLeft className="w-4 h-4 text-[#5C3D2E] shrink-0" />
             <span>Site Assignments</span>
@@ -205,10 +225,10 @@ export const FieldOfficerDashboard: React.FC<FieldOfficerDashboardProps> = ({
           <button
             type="button"
             onClick={() => navigate('/field-officer/employees')}
-            className="min-h-[44px] inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+            className="min-h-[44px] inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
           >
             <Users className="w-4 h-4 text-[#5C3D2E] shrink-0" />
-            <span>Personnel Roster</span>
+            <span>Personnel</span>
           </button>
 
           <button

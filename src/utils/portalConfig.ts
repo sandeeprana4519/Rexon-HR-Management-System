@@ -68,8 +68,8 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
       'Verified Firestore role "admin" required. All master mutations, permission assignments, and approval decisions are written to append-only audit logs.',
     allowedCapabilities: [
       'Manage Branches, HR Accounts, Services (Security, Housekeeping, Manpower), and Designations',
-      'Assign granular HR permissions across 23 module actions and branch scopes',
-      'Full visibility across all Clients, Sites, and Site Service manpower summaries',
+      'Assign granular HR permissions across 39 module actions and branch scopes',
+      'Full visibility across all Clients, Sites, Duty Rosters, Attendance, and Manpower summaries',
       'Approve or reject sensitive HR workflow requests and inspect immutable Audit Logs',
     ],
     restrictedCapabilities: [
@@ -130,6 +130,18 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         shortLabel: 'Available',
         path: '/admin/availability',
         iconName: 'UserCheck',
+      },
+      {
+        label: 'Duty Rosters',
+        shortLabel: 'Rosters',
+        path: '/admin/rosters',
+        iconName: 'CalendarCheck',
+      },
+      {
+        label: 'Attendance & Duty',
+        shortLabel: 'Attendance',
+        path: '/admin/attendance',
+        iconName: 'ClipboardCheck',
       },
       {
         label: 'Service Management',
@@ -241,6 +253,18 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         iconName: 'UserCheck',
       },
       {
+        label: 'Duty Rosters',
+        shortLabel: 'Rosters',
+        path: '/hr/rosters',
+        iconName: 'CalendarCheck',
+      },
+      {
+        label: 'Attendance & Duty',
+        shortLabel: 'Attendance',
+        path: '/hr/attendance',
+        iconName: 'ClipboardCheck',
+      },
+      {
         label: 'Service & Designation',
         shortLabel: 'Services',
         path: '/hr/services-designations',
@@ -294,6 +318,18 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         shortLabel: 'Overview',
         path: '/field-officer',
         iconName: 'LayoutDashboard',
+      },
+      {
+        label: 'Site Attendance',
+        shortLabel: 'Attendance',
+        path: '/field-officer/attendance',
+        iconName: 'CalendarCheck',
+      },
+      {
+        label: 'Duty Rosters',
+        shortLabel: 'Rosters',
+        path: '/field-officer/rosters',
+        iconName: 'ClipboardCheck',
       },
       {
         label: 'Site Assignments',
@@ -364,8 +400,8 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
       'Download client invoices, payment receipts, and service reports',
     ],
     restrictedCapabilities: [
-      'Zero access to employee Aadhaar, bank details, phone, or salary',
-      'Read-only client scope — cannot create, edit, or delete employees or sites',
+      'Zero access to employee Aadhaar, bank details, phone, salary, or GPS location history',
+      'Read-only client scope — cannot create, edit, or delete employees, rosters, or sites',
     ],
     navItems: [
       {
@@ -616,5 +652,62 @@ export function hasUserPermission(user: RexonUser | null, perm: string): boolean
   if (target === 'billing.view' && userPerms.includes('billing.manage')) return true;
   if (target === 'payroll.view' && userPerms.includes('payroll.manage')) return true;
 
+  // Phase 4 Roster & Attendance permission implications
+  if (
+    (target === 'site.view' ||
+      target === 'client.view' ||
+      target === 'service.view' ||
+      target === 'designation.view' ||
+      target === 'employee.view') &&
+    (userPerms.includes('roster.view') ||
+      userPerms.includes('roster.create') ||
+      userPerms.includes('roster.edit') ||
+      userPerms.includes('roster.publish') ||
+      userPerms.includes('attendance.view') ||
+      userPerms.includes('attendance.verify') ||
+      userPerms.includes('attendance.approve') ||
+      userPerms.includes('attendance.gps_settings') ||
+      userPerms.includes('attendance.qr_manage'))
+  ) {
+    return true;
+  }
+  if (
+    target === 'roster.view' &&
+    (userPerms.includes('roster.create') ||
+      userPerms.includes('roster.edit') ||
+      userPerms.includes('roster.publish') ||
+      userPerms.includes('roster.delete') ||
+      userPerms.includes('attendance.view') ||
+      userPerms.includes('attendance.verify') ||
+      userPerms.includes('attendance.approve'))
+  ) {
+    return true;
+  }
+  if (target === 'roster.edit' && userPerms.includes('roster.publish')) return true;
+  if (
+    target === 'attendance.view' &&
+    (userPerms.includes('attendance.view_all_branch') ||
+      userPerms.includes('attendance.create') ||
+      userPerms.includes('attendance.edit') ||
+      userPerms.includes('attendance.verify') ||
+      userPerms.includes('attendance.approve') ||
+      userPerms.includes('attendance.correct') ||
+      userPerms.includes('attendance.export') ||
+      userPerms.includes('attendance.overtime_approve') ||
+      userPerms.includes('attendance.qr_manage') ||
+      userPerms.includes('attendance.gps_settings'))
+  ) {
+    return true;
+  }
+  if (
+    (target === 'attendance.verify' ||
+      target === 'attendance.correct' ||
+      target === 'attendance.edit') &&
+    userPerms.includes('attendance.approve')
+  ) {
+    return true;
+  }
+
   return false;
 }
+

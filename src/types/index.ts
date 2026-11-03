@@ -119,4 +119,6 @@ export interface LivePortalMetrics {
 export * from './masterData';
 export * from './employee';
 export * from './deployment';
+export * from './attendance';
+
 

@@ -41,6 +41,7 @@ import {
   ServiceFormInput,
   ServiceRecord,
   SiteFormInput,
+  SiteGeoQrConfigInput,
   SiteManpowerSummary,
   SiteRecord,
   SiteServiceConfigFormInput,
@@ -48,7 +49,17 @@ import {
   SiteStatus,
   SubmitApprovalInput,
 } from '../../types';
-import { computeNonNegativeVacancy, normalizeCode } from '../../utils/masterValidation';
+import {
+  computeNonNegativeVacancy,
+  normalizeCode,
+  validateBranchForm,
+  validateClientForm,
+  validateDesignationForm,
+  validateHRProfileForm,
+  validateServiceForm,
+  validateSiteForm,
+  validateSiteServiceConfigForm,
+} from '../../utils/masterValidation';
 import {
   getAuthorizedBranchIds,
   hasUserPermission,
@@ -1415,6 +1426,11 @@ export async function createBranchRecord(
   }
 
   const existing = await listBranches(caller, isPreviewSession);
+  const validation = validateBranchForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Branch validation failed.');
+  }
+
   const branchId = generateNextId(
     'BRN',
     existing.map((b) => b.branchId)
@@ -1499,6 +1515,12 @@ export async function updateBranchRecord(
 ): Promise<void> {
   if (caller.role !== 'admin') {
     throw new Error('Only Administrators can edit Branch records.');
+  }
+
+  const existing = await listBranches(caller, isPreviewSession);
+  const validation = validateBranchForm(input, existing, branchId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Branch validation failed.');
   }
 
   const nowIso = new Date().toISOString();
@@ -1783,6 +1805,11 @@ export async function createHRProfileAccount(
   }
 
   const existing = await listHRProfiles(caller, isPreviewSession);
+  const validation = validateHRProfileForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'HR profile validation failed.');
+  }
+
   const hrId = generateNextId(
     'HR',
     existing.map((h) => h.hrId)
@@ -1920,6 +1947,12 @@ export async function updateHRProfileAccount(
 ): Promise<void> {
   if (caller.role !== 'admin') {
     throw new Error('Only Administrators can update HR accounts.');
+  }
+
+  const existingProfiles = await listHRProfiles(caller, isPreviewSession);
+  const validation = validateHRProfileForm(input, existingProfiles, hrId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'HR profile validation failed.');
   }
 
   let photoUrl = input.profilePhoto || '';
@@ -2075,12 +2108,28 @@ export async function updateHRAccountStatus(
 
   const path = `hrProfiles/${hrId}`;
   try {
+    const hrRef = doc(firestoreDb!, 'hrProfiles', hrId);
+    const hrSnap = await getDoc(hrRef);
+    const target = hrSnap.exists() ? (hrSnap.data() as HRProfileRecord) : null;
+
     const batch = writeBatch(firestoreDb!);
-    batch.update(doc(firestoreDb!, 'hrProfiles', hrId), {
+    batch.update(hrRef, {
       accountStatus: nextStatus,
       updatedAt: nowIso,
       serverUpdatedAt: serverTimestamp(),
     });
+
+    if (target?.uid && !target.uid.startsWith('pending-auth-')) {
+      const userRef = doc(firestoreDb!, 'users', target.uid);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        batch.update(userRef, {
+          isActive: nextStatus === 'Active',
+          updatedAt: nowIso,
+        });
+      }
+    }
+
     const logId = makeRuntimeLogId();
     batch.set(doc(firestoreDb!, 'auditLogs', logId), {
       ...buildAuditLogObject(caller, {
@@ -2088,7 +2137,7 @@ export async function updateHRAccountStatus(
         action: 'HR Updated',
         module: 'HR',
         recordId: hrId,
-        branchId: caller.branchId,
+        branchId: target?.assignedBranches?.[0] || caller.branchId,
         summary,
       }),
       createdAt: serverTimestamp(),
@@ -2292,6 +2341,11 @@ export async function createClientRecord(
     ? readLocalStore().clients
     : await listClients(caller, isPreviewSession);
 
+  const validation = validateClientForm(input, storeSnapshot);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Client validation failed.');
+  }
+
   const clientId = generateNextId(
     'CLT',
     storeSnapshot.map((c) => c.clientId)
@@ -2389,6 +2443,14 @@ export async function updateClientRecord(
   }
   if (caller.role === 'hr' && !getAuthorizedBranchIds(caller).includes(input.assignedBranch)) {
     throw new Error('You cannot transfer or edit Clients outside your assigned branch(es).');
+  }
+
+  const existingClients = !useLiveFirestore(isPreviewSession)
+    ? readLocalStore().clients
+    : await listClients(caller, isPreviewSession);
+  const validation = validateClientForm(input, existingClients, clientId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Client validation failed.');
   }
 
   const nowIso = new Date().toISOString();
@@ -2643,6 +2705,11 @@ export async function createSiteRecord(
     ? readLocalStore().sites
     : await listSites(caller, isPreviewSession);
 
+  const validation = validateSiteForm(input, allExisting);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Site validation failed.');
+  }
+
   const siteId = generateNextId(
     'STE',
     allExisting.map((s) => s.siteId)
@@ -2740,6 +2807,14 @@ export async function updateSiteRecord(
     throw new Error('You cannot update Sites outside your assigned branch(es).');
   }
 
+  const existingSites = !useLiveFirestore(isPreviewSession)
+    ? readLocalStore().sites
+    : await listSites(caller, isPreviewSession);
+  const validation = validateSiteForm(input, existingSites, siteId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Site validation failed.');
+  }
+
   const nowIso = new Date().toISOString();
   const summary = `Updated Site ${siteId} (${input.siteName}) · Status: ${input.siteStatus}.`;
 
@@ -2834,6 +2909,178 @@ export async function updateSiteRecord(
     });
     await batch.commit();
     notifyListeners();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function getSiteByIdForAttendance(
+  siteId: string,
+  isPreviewSession: boolean
+): Promise<SiteRecord | null> {
+  if (!siteId.trim()) return null;
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalStore();
+    return store.sites.find((s) => s.siteId === siteId && !s.isArchived) ?? null;
+  }
+  const path = `sites/${siteId}`;
+  try {
+    const snap = await getDoc(doc(firestoreDb!, 'sites', siteId));
+    if (!snap.exists()) return null;
+    const record = snap.data() as SiteRecord;
+    return record.isArchived ? null : record;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, path);
+  }
+}
+
+export async function updateSiteAttendanceSettings(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  config: SiteGeoQrConfigInput
+): Promise<SiteRecord> {
+  if (
+    caller.role !== 'admin' &&
+    !(
+      caller.role === 'hr' &&
+      (hasUserPermission(caller, 'attendance.gps_settings') ||
+        hasUserPermission(caller, 'site.edit'))
+    )
+  ) {
+    throw new Error(
+      'Configuring site GPS geofence & QR settings requires Admin access or attendance.gps_settings permission.'
+    );
+  }
+
+  const clampedRadius = Math.min(5000, Math.max(20, Math.round(config.allowedRadiusMeters || 150)));
+  const clampedAccuracy = Math.min(
+    1000,
+    Math.max(10, Math.round(config.gpsAccuracyThresholdMeters || 100))
+  );
+
+  if (config.latitude !== null || config.longitude !== null) {
+    if (
+      config.latitude === null ||
+      config.longitude === null ||
+      !Number.isFinite(config.latitude) ||
+      !Number.isFinite(config.longitude) ||
+      config.latitude < -90 ||
+      config.latitude > 90 ||
+      config.longitude < -180 ||
+      config.longitude > 180
+    ) {
+      throw new Error(
+        'Enter valid Latitude (-90 to 90) and Longitude (-180 to 180) coordinates.'
+      );
+    }
+  } else if (config.isGpsMandatory) {
+    throw new Error(
+      'Site Latitude and Longitude are required when Mandatory GPS Geofence is enabled.'
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalStore();
+    const target = store.sites.find((s) => s.siteId === config.siteId);
+    if (!target) {
+      throw new Error(`Site ${config.siteId} not found.`);
+    }
+    if (caller.role === 'hr' && !getAuthorizedBranchIds(caller).includes(target.branchId)) {
+      throw new Error('Unauthorized branch scope for site GPS/QR configuration.');
+    }
+
+    const updatedSite: SiteRecord = {
+      ...target,
+      latitude: config.latitude,
+      longitude: config.longitude,
+      googleMapsLocation:
+        config.latitude !== null && config.longitude !== null
+          ? `${config.latitude}, ${config.longitude}`
+          : target.googleMapsLocation,
+      allowedRadiusMeters: clampedRadius,
+      gpsAccuracyThresholdMeters: clampedAccuracy,
+      isGpsMandatory: config.isGpsMandatory,
+      isQrEnabled: config.isQrEnabled,
+      updatedAt: nowIso,
+      history: [
+        makeHistoryEntry(
+          caller,
+          'SITE_GEOFENCE_UPDATED',
+          `Configured GPS radius ${clampedRadius}m, accuracy <=${clampedAccuracy}m, GPS mandatory: ${config.isGpsMandatory}, QR enabled: ${config.isQrEnabled}`
+        ),
+        ...target.history,
+      ],
+    };
+
+    store.sites = store.sites.map((s) => (s.siteId === config.siteId ? updatedSite : s));
+    appendLocalAudit(store, caller, {
+      action: 'Site Geofence & QR Updated',
+      module: 'Attendance',
+      recordId: config.siteId,
+      branchId: target.branchId,
+      summary: `Updated attendance geofence on ${target.siteName} (${config.siteId}): radius ${clampedRadius}m, accuracy <=${clampedAccuracy}m, QR=${config.isQrEnabled}.`,
+    });
+    writeLocalStore(store);
+    return updatedSite;
+  }
+
+  const path = `sites/${config.siteId}`;
+  try {
+    const siteRef = doc(firestoreDb!, 'sites', config.siteId);
+    const snap = await getDoc(siteRef);
+    if (!snap.exists()) {
+      throw new Error(`Site ${config.siteId} not found.`);
+    }
+    const target = snap.data() as SiteRecord;
+    if (caller.role === 'hr' && !getAuthorizedBranchIds(caller).includes(target.branchId)) {
+      throw new Error('Unauthorized branch scope for site GPS/QR configuration.');
+    }
+
+    const batch = writeBatch(firestoreDb!);
+    const nextMapsLoc =
+      config.latitude !== null && config.longitude !== null
+        ? `${config.latitude}, ${config.longitude}`
+        : target.googleMapsLocation;
+
+    batch.update(siteRef, {
+      latitude: config.latitude,
+      longitude: config.longitude,
+      googleMapsLocation: nextMapsLoc,
+      allowedRadiusMeters: clampedRadius,
+      gpsAccuracyThresholdMeters: clampedAccuracy,
+      isGpsMandatory: config.isGpsMandatory,
+      isQrEnabled: config.isQrEnabled,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+
+    const logId = makeRuntimeLogId();
+    batch.set(doc(firestoreDb!, 'auditLogs', logId), {
+      ...buildAuditLogObject(caller, {
+        logId,
+        action: 'Site Geofence & QR Updated',
+        module: 'Attendance',
+        recordId: config.siteId,
+        branchId: target.branchId,
+        summary: `Updated attendance geofence on ${target.siteName} (${config.siteId}): radius ${clampedRadius}m, accuracy <=${clampedAccuracy}m, QR=${config.isQrEnabled}.`,
+      }),
+      createdAt: serverTimestamp(),
+    });
+    await batch.commit();
+    notifyListeners();
+    return {
+      ...target,
+      latitude: config.latitude,
+      longitude: config.longitude,
+      googleMapsLocation: nextMapsLoc,
+      allowedRadiusMeters: clampedRadius,
+      gpsAccuracyThresholdMeters: clampedAccuracy,
+      isGpsMandatory: config.isGpsMandatory,
+      isQrEnabled: config.isQrEnabled,
+      updatedAt: nowIso,
+    };
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
@@ -3077,6 +3324,11 @@ export async function createServiceRecord(
   }
 
   const existing = await listServices(caller, isPreviewSession);
+  const validation = validateServiceForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Service validation failed.');
+  }
+
   const serviceId = generateNextId(
     'SRV',
     existing.map((s) => s.serviceId)
@@ -3146,6 +3398,12 @@ export async function updateServiceRecord(
 ): Promise<void> {
   if (!hasUserPermission(caller, 'service.manage')) {
     throw new Error('Only Administrators (or HR with service.manage) can edit Services.');
+  }
+
+  const existingServices = await listServices(caller, isPreviewSession);
+  const validation = validateServiceForm(input, existingServices, serviceId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Service validation failed.');
   }
 
   const nowIso = new Date().toISOString();
@@ -3325,6 +3583,11 @@ export async function createDesignationRecord(
   }
 
   const existing = await listDesignations(caller, isPreviewSession);
+  const validation = validateDesignationForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Designation validation failed.');
+  }
+
   const designationId = generateNextId(
     'DSG',
     existing.map((d) => d.designationId)
@@ -3399,6 +3662,12 @@ export async function updateDesignationRecord(
 ): Promise<void> {
   if (!hasUserPermission(caller, 'designation.manage')) {
     throw new Error('Only Administrators (or HR with designation.manage) can edit Designations.');
+  }
+
+  const existingDesignations = await listDesignations(caller, isPreviewSession);
+  const validation = validateDesignationForm(input, existingDesignations, designationId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Designation validation failed.');
   }
 
   const nowIso = new Date().toISOString();
@@ -3674,6 +3943,11 @@ export async function createSiteServiceConfig(
   }
 
   const existing = await listSiteServiceConfigs(caller, isPreviewSession);
+  const validation = validateSiteServiceConfigForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Site Service configuration validation failed.');
+  }
+
   const siteServiceId = generateNextId(
     'SSC',
     existing.map((c) => c.siteServiceId)
@@ -3764,6 +4038,12 @@ export async function updateSiteServiceConfig(
   }
   if (input.deployedCount > input.requiredCount) {
     throw new Error('Deployed Count cannot exceed Required Count (negative vacancy is prohibited).');
+  }
+
+  const existingConfigs = await listSiteServiceConfigs(caller, isPreviewSession);
+  const validation = validateSiteServiceConfigForm(input, existingConfigs, siteServiceId);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Site Service configuration validation failed.');
   }
 
   const nowIso = new Date().toISOString();

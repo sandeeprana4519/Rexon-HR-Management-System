@@ -77,6 +77,11 @@ function mapRequestTypeToModule(
     case 'Field Officer Transfer Request':
     case 'Manpower Shortage Escalation':
       return 'Assignment';
+    case 'Roster Capacity Exception':
+      return 'Roster';
+    case 'Attendance Correction Approval':
+    case 'Overtime Approval Request':
+      return 'Attendance';
   }
 }
 
@@ -276,6 +281,13 @@ export const ApprovalsPage: React.FC = () => {
       const b = authorizedBranches[0];
       targetRecordId = b?.branchId || 'BRN-SCOPE';
       targetRecordName = b?.branchName || 'Branch Scope Request';
+    } else if (mod === 'Roster' || mod === 'Attendance' || mod === 'Assignment') {
+      const s = sites.find((item) => item.branchId === branchId) || sites[0];
+      if (s) {
+        targetRecordId = s.siteId;
+        targetRecordName = s.siteName;
+        branchId = s.branchId;
+      }
     }
 
     setSubmitForm((prev) => ({

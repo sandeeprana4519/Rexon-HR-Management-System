@@ -8,7 +8,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { OperationType, RexonUser, UserRole } from '../../types';
-import { isValidUserRole } from '../../utils/portalConfig';
+import { isValidUserRole, normalizePermissionList } from '../../utils/portalConfig';
 import { sanitizeInput } from '../../utils/validation';
 import { firestoreDb, isFirebaseConfigured } from '../firebase/config';
 import { handleFirestoreError } from './errorHandler';
@@ -30,19 +30,44 @@ function parseFirestoreUserDocument(uid: string, raw: Record<string, unknown>): 
     );
   }
 
+  const branchId =
+    typeof raw.branchId === 'string' && raw.branchId.trim().length > 0
+      ? raw.branchId.trim()
+      : 'UNASSIGNED';
+
+  const parsedAssignedBranches = Array.isArray(raw.assignedBranches)
+    ? Array.from(
+        new Set(
+          raw.assignedBranches
+            .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+            .map((item) => item.trim())
+        )
+      ).slice(0, 25)
+    : [];
+
+  const assignedBranches =
+    parsedAssignedBranches.length > 0
+      ? parsedAssignedBranches
+      : branchId !== 'UNASSIGNED'
+        ? [branchId]
+        : [];
+
+  const rawPermissions = Array.isArray(raw.permissions)
+    ? raw.permissions.filter((item): item is string => typeof item === 'string').slice(0, 40)
+    : [];
+
   return {
     uid,
     fullName: typeof raw.fullName === 'string' ? raw.fullName : 'Unnamed User',
     email: typeof raw.email === 'string' ? raw.email : '',
     phone: typeof raw.phone === 'string' ? raw.phone : '',
     role: raw.role as UserRole,
-    branchId: typeof raw.branchId === 'string' ? raw.branchId : 'UNASSIGNED',
+    branchId,
+    assignedBranches,
     assignedSiteIds: Array.isArray(raw.assignedSiteIds)
       ? raw.assignedSiteIds.filter((item): item is string => typeof item === 'string').slice(0, 50)
       : [],
-    permissions: Array.isArray(raw.permissions)
-      ? raw.permissions.filter((item): item is string => typeof item === 'string').slice(0, 40)
-      : [],
+    permissions: normalizePermissionList(rawPermissions),
     isActive: Boolean(raw.isActive),
     createdAt: formatTimestampField(raw.createdAt),
     updatedAt: formatTimestampField(raw.updatedAt),

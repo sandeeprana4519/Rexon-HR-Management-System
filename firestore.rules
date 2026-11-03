@@ -86,6 +86,11 @@ service cloud.firestore {
         );
     }
 
+    function isAuthorizedForAttendanceBranch(branchId) {
+      return isAuthorizedForBranch(branchId)
+        || (isHR() && 'attendance.view_all_branch' in callerData().permissions);
+    }
+
     function isAuthorizedFieldOfficerBranch(branchId) {
       return isFieldOfficer()
         && (
@@ -141,7 +146,7 @@ service cloud.firestore {
         && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
         && (!('assignedBranches' in data) || isValidBoundedStringArray(data.assignedBranches, 25))
         && isValidBoundedStringArray(data.assignedSiteIds, 50)
-        && isValidBoundedStringArray(data.permissions, 40)
+        && isValidBoundedStringArray(data.permissions, 60)
         && data.isActive is bool;
     }
 
@@ -178,7 +183,7 @@ service cloud.firestore {
         && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
         && data.mobile is string && data.mobile.size() >= 7 && data.mobile.size() <= 20
         && isValidBoundedStringArray(data.assignedBranches, 25)
-        && isValidBoundedStringArray(data.permissions, 40)
+        && isValidBoundedStringArray(data.permissions, 60)
         && data.hrDesignation in ['Senior HR', 'Branch HR', 'Site HR', 'HR Executive', 'Accountant']
         && data.permissionProfile is string && data.permissionProfile.size() >= 2 && data.permissionProfile.size() <= 80
         && data.accountStatus in ['Active', 'Inactive', 'Suspended'];
@@ -213,6 +218,12 @@ service cloud.firestore {
         && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
         && data.siteName is string && data.siteName.size() >= 3 && data.siteName.size() <= 140
         && data.siteStatus in ['Active', 'Inactive', 'Pending', 'Suspended']
+        && (!('latitude' in data) || data.latitude == null || (data.latitude is number && data.latitude >= -90 && data.latitude <= 90))
+        && (!('longitude' in data) || data.longitude == null || (data.longitude is number && data.longitude >= -180 && data.longitude <= 180))
+        && (!('allowedRadiusMeters' in data) || (data.allowedRadiusMeters is int && data.allowedRadiusMeters >= 20 && data.allowedRadiusMeters <= 5000))
+        && (!('gpsAccuracyThresholdMeters' in data) || (data.gpsAccuracyThresholdMeters is int && data.gpsAccuracyThresholdMeters >= 10 && data.gpsAccuracyThresholdMeters <= 1000))
+        && (!('isGpsMandatory' in data) || data.isGpsMandatory is bool)
+        && (!('isQrEnabled' in data) || data.isQrEnabled is bool)
         && data.isArchived is bool;
     }
 
@@ -335,10 +346,14 @@ service cloud.firestore {
           'Branch Scope Exception',
           'Field Officer Replacement Request',
           'Field Officer Transfer Request',
-          'Manpower Shortage Escalation'
+          'Manpower Shortage Escalation',
+          'Roster Capacity Exception',
+          'Attendance Correction Approval',
+          'Overtime Approval Request'
         ]
         && data.module in [
-          'Client', 'Site', 'Employee', 'Permissions', 'Branch', 'Service', 'Designation', 'Assignment'
+          'Client', 'Site', 'Employee', 'Permissions', 'Branch', 'Service',
+          'Designation', 'Assignment', 'Roster', 'Attendance'
         ]
         && data.targetRecordId is string && data.targetRecordId.size() >= 1 && data.targetRecordId.size() <= 64
         && data.targetRecordName is string && data.targetRecordName.size() >= 1 && data.targetRecordName.size() <= 140
@@ -370,7 +385,8 @@ service cloud.firestore {
         && data.action is string && data.action.size() >= 2 && data.action.size() <= 120
         && data.module in [
           'Branch', 'HR', 'Client', 'Site', 'Employee', 'SiteService',
-          'Service', 'Designation', 'Permissions', 'Approvals', 'Assignment'
+          'Service', 'Designation', 'Permissions', 'Approvals', 'Assignment',
+          'Roster', 'Attendance'
         ]
         && data.recordId is string && data.recordId.size() >= 1 && data.recordId.size() <= 64
         && data.performedBy is string && data.performedBy.size() >= 2 && data.performedBy.size() <= 200
@@ -548,8 +564,8 @@ service cloud.firestore {
         && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
         && isValidServiceCategory(data.serviceCategory)
         && data.shortageCount is int && data.shortageCount >= 1 && data.shortageCount <= 500
-        && data.urgency in ['Low', 'Medium', 'High', 'Critical']
-        && data.status in ['Open', 'In Review', 'Resolved', 'Dismissed']
+        && data.urgency in ['Normal', 'High', 'Critical']
+        && data.status in ['Open', 'Acknowledged', 'Resolved']
         && data.reason is string && data.reason.size() >= 6 && data.reason.size() <= 400
         && isValidRoleValue(data.reportedByRole);
     }
@@ -574,6 +590,322 @@ service cloud.firestore {
         && data.totalDeployed is int && data.totalDeployed >= 0
         && data.totalVacant is int && data.totalVacant >= 0
         && data.lines is list && data.lines.size() <= 200
+        && data.shiftBreakdown is list && data.shiftBreakdown.size() <= 100;
+    }
+
+    function isValidDutyRosterPayload(data, rosterId) {
+      return data.keys().hasAll([
+          'rosterId', 'scheduleMode', 'batchCode', 'branchId', 'branchName',
+          'clientId', 'clientName', 'siteId', 'siteName', 'siteServiceId',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'employeeId', 'employeeName', 'linkedUid', 'assignmentId',
+          'dutyDate', 'dutyEndDate', 'shiftType', 'dutyStartTime', 'dutyEndTime',
+          'crossesMidnight', 'breakDurationMinutes', 'grossDurationMinutes', 'netScheduledMinutes',
+          'reportingTime', 'gracePeriodMinutes', 'assignedFieldOfficerUid', 'assignedFieldOfficerName',
+          'dutyInstructions', 'status', 'authorizedCapacityException', 'capacityExceptionReason',
+          'publishedAt', 'publishedBy', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'rosterId', 'scheduleMode', 'batchCode', 'branchId', 'branchName',
+          'clientId', 'clientName', 'siteId', 'siteName', 'siteServiceId',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'employeeId', 'employeeName', 'linkedUid', 'assignmentId',
+          'dutyDate', 'dutyEndDate', 'shiftType', 'dutyStartTime', 'dutyEndTime',
+          'crossesMidnight', 'breakDurationMinutes', 'grossDurationMinutes', 'netScheduledMinutes',
+          'reportingTime', 'gracePeriodMinutes', 'assignedFieldOfficerUid', 'assignedFieldOfficerName',
+          'dutyInstructions', 'status', 'authorizedCapacityException', 'capacityExceptionReason',
+          'publishedAt', 'publishedBy', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
+          'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && data.rosterId == rosterId
+        && data.scheduleMode in ['Daily', 'Weekly', 'Monthly']
+        && data.batchCode is string && data.batchCode.size() >= 1 && data.batchCode.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.branchName is string && data.branchName.size() <= 140
+        && data.clientId is string && data.clientId.size() >= 1 && data.clientId.size() <= 64
+        && data.clientName is string && data.clientName.size() <= 150
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 140
+        && data.siteServiceId is string && data.siteServiceId.size() <= 64
+        && isValidServiceCategory(data.serviceCategory)
+        && data.serviceId is string && data.serviceId.size() >= 1 && data.serviceId.size() <= 64
+        && data.serviceName is string && data.serviceName.size() <= 100
+        && data.designationId is string && data.designationId.size() >= 1 && data.designationId.size() <= 64
+        && data.designationName is string && data.designationName.size() <= 100
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 120
+        && data.linkedUid is string && data.linkedUid.size() <= 128
+        && data.assignmentId is string && data.assignmentId.size() >= 1 && data.assignmentId.size() <= 64
+        && data.dutyDate is string && data.dutyDate.size() == 10
+        && data.dutyEndDate is string && data.dutyEndDate.size() == 10
+        && data.shiftType in ['Day Shift', 'Night Shift', 'General Shift', 'Rotational Shift', 'Custom Shift']
+        && data.dutyStartTime is string && data.dutyStartTime.size() == 5
+        && data.dutyEndTime is string && data.dutyEndTime.size() == 5
+        && data.crossesMidnight is bool
+        && data.breakDurationMinutes is int && data.breakDurationMinutes >= 0 && data.breakDurationMinutes <= 240
+        && data.grossDurationMinutes is int && data.grossDurationMinutes > 0 && data.grossDurationMinutes <= 960
+        && data.netScheduledMinutes is int && data.netScheduledMinutes > 0 && data.netScheduledMinutes <= 960
+        && data.reportingTime is string && data.reportingTime.size() == 5
+        && data.gracePeriodMinutes is int && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 120
+        && data.assignedFieldOfficerUid is string && data.assignedFieldOfficerUid.size() <= 128
+        && data.assignedFieldOfficerName is string && data.assignedFieldOfficerName.size() <= 120
+        && data.dutyInstructions is string && data.dutyInstructions.size() <= 400
+        && data.status in ['Draft', 'Published', 'Cancelled']
+        && data.authorizedCapacityException is bool
+        && data.capacityExceptionReason is string && data.capacityExceptionReason.size() <= 300
+        && (data.publishedAt == null || (data.publishedAt is string && data.publishedAt.size() <= 40))
+        && (data.publishedBy == null || (data.publishedBy is string && data.publishedBy.size() <= 128))
+        && data.createdBy is string && data.createdBy.size() <= 128
+        && data.updatedBy is string && data.updatedBy.size() <= 128
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidAttendancePayload(data, recordId) {
+      return data.keys().hasAll([
+          'attendanceId', 'employeeId', 'employeeName', 'linkedUid', 'employeeUid',
+          'branchId', 'branchName', 'clientId', 'clientName', 'siteId', 'siteName',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'assignmentId', 'rosterId', 'attendanceDate', 'date', 'shiftType',
+          'scheduledStartTime', 'scheduledEndTime', 'crossesMidnight',
+          'breakDurationMinutes', 'gracePeriodMinutes', 'status',
+          'checkInAt', 'checkOutAt', 'checkInMethod', 'checkOutMethod',
+          'checkInGeo', 'checkOutGeo', 'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
+          'totalGrossMinutes', 'totalDutyMinutes', 'totalDutyHours',
+          'lateArrivalMinutes', 'earlyDepartureMinutes', 'overtimeMinutes',
+          'overtimeStatus', 'approvedOvertimeMinutes', 'overtimeApprovedBy', 'overtimeApprovedAt',
+          'verificationOutcome', 'isVerifiedByHr', 'verifiedByUid', 'verifiedByName', 'verifiedAt',
+          'exceptionReason', 'hrRemarks', 'fieldOfficerRemarks',
+          'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'attendanceId', 'employeeId', 'employeeName', 'linkedUid', 'employeeUid',
+          'branchId', 'branchName', 'clientId', 'clientName', 'siteId', 'siteName',
+          'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
+          'assignmentId', 'rosterId', 'attendanceDate', 'date', 'shiftType',
+          'scheduledStartTime', 'scheduledEndTime', 'crossesMidnight',
+          'breakDurationMinutes', 'gracePeriodMinutes', 'status',
+          'checkInAt', 'checkOutAt', 'checkInMethod', 'checkOutMethod',
+          'checkInGeo', 'checkOutGeo', 'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
+          'totalGrossMinutes', 'totalDutyMinutes', 'totalDutyHours',
+          'lateArrivalMinutes', 'earlyDepartureMinutes', 'overtimeMinutes',
+          'overtimeStatus', 'approvedOvertimeMinutes', 'overtimeApprovedBy', 'overtimeApprovedAt',
+          'verificationOutcome', 'isVerifiedByHr', 'verifiedByUid', 'verifiedByName', 'verifiedAt',
+          'exceptionReason', 'hrRemarks', 'fieldOfficerRemarks',
+          'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
+          'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && data.attendanceId == recordId
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 120
+        && data.linkedUid is string && data.linkedUid.size() <= 128
+        && data.employeeUid is string && data.employeeUid.size() >= 1 && data.employeeUid.size() <= 128
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 140
+        && isValidServiceCategory(data.serviceCategory)
+        && data.attendanceDate is string && data.attendanceDate.size() == 10
+        && data.date is string && data.date.size() == 10
+        && data.shiftType is string && data.shiftType.size() >= 2 && data.shiftType.size() <= 80
+        && data.scheduledStartTime is string && data.scheduledStartTime.size() == 5
+        && data.scheduledEndTime is string && data.scheduledEndTime.size() == 5
+        && data.crossesMidnight is bool
+        && data.status in [
+          'Present', 'Absent', 'Late', 'Half Day', 'Weekly Off', 'Holiday', 'Leave', 'Pending', 'Exception'
+        ]
+        && (data.checkInAt == null || (data.checkInAt is string && data.checkInAt.size() <= 40))
+        && (data.checkOutAt == null || (data.checkOutAt is string && data.checkOutAt.size() <= 40))
+        && (data.checkInMethod == null || data.checkInMethod in ['GPS', 'QR', 'Manual_HR'])
+        && (data.checkOutMethod == null || data.checkOutMethod in ['GPS', 'QR', 'Manual_HR'])
+        && data.totalDutyMinutes is int && data.totalDutyMinutes >= 0 && data.totalDutyMinutes <= 1440
+        && data.totalDutyHours is number && data.totalDutyHours >= 0 && data.totalDutyHours <= 24
+        && data.overtimeMinutes is int && data.overtimeMinutes >= 0 && data.overtimeMinutes <= 720
+        && data.overtimeStatus in ['None', 'Pending', 'Approved', 'Rejected']
+        && data.approvedOvertimeMinutes is int && data.approvedOvertimeMinutes >= 0 && data.approvedOvertimeMinutes <= 720
+        && data.verificationOutcome in [
+          'Verified', 'QR_Verified', 'Outside_Geofence', 'Low_GPS_Accuracy',
+          'GPS_Unavailable', 'Manual_Override', 'Pending_Review', 'Rejected'
+        ]
+        && data.isVerifiedByHr is bool
+        && data.exceptionReason is string && data.exceptionReason.size() <= 300
+        && data.hrRemarks is string && data.hrRemarks.size() <= 300
+        && data.fieldOfficerRemarks is string && data.fieldOfficerRemarks.size() <= 300
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidAttendanceCorrectionPayload(data, correctionId) {
+      return data.keys().hasAll([
+          'correctionId', 'requestType', 'attendanceId', 'rosterId', 'assignmentId',
+          'employeeId', 'employeeName', 'linkedUid', 'branchId', 'clientId', 'siteId', 'siteName',
+          'attendanceDate', 'shiftType', 'requestedCheckInAt', 'requestedCheckOutAt',
+          'requestedCheckOutNextDay', 'reason', 'supportingLocationNote', 'status',
+          'requestedByUid', 'requestedByName', 'requestedByRole',
+          'reviewedByUid', 'reviewedByName', 'reviewRemarks', 'reviewedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'correctionId', 'requestType', 'attendanceId', 'rosterId', 'assignmentId',
+          'employeeId', 'employeeName', 'linkedUid', 'branchId', 'clientId', 'siteId', 'siteName',
+          'attendanceDate', 'shiftType', 'requestedCheckInAt', 'requestedCheckOutAt',
+          'requestedCheckOutNextDay', 'reason', 'supportingLocationNote', 'status',
+          'requestedByUid', 'requestedByName', 'requestedByRole',
+          'reviewedByUid', 'reviewedByName', 'reviewRemarks', 'reviewedAt',
+          'createdAt', 'updatedAt', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.correctionId == correctionId
+        && data.requestType in [
+          'Missing Check-In', 'Missing Check-Out', 'Both Punches Missing',
+          'Geofence Exception', 'Time / Status Correction'
+        ]
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 120
+        && data.linkedUid is string && data.linkedUid.size() <= 128
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.attendanceDate is string && data.attendanceDate.size() == 10
+        && data.requestedCheckInAt is string && data.requestedCheckInAt.size() <= 40
+        && data.requestedCheckOutAt is string && data.requestedCheckOutAt.size() <= 40
+        && data.requestedCheckOutNextDay is bool
+        && data.reason is string && data.reason.size() >= 6 && data.reason.size() <= 400
+        && data.supportingLocationNote is string && data.supportingLocationNote.size() <= 250
+        && data.status in ['Pending', 'Approved', 'Rejected']
+        && data.requestedByUid is string && data.requestedByUid.size() >= 1 && data.requestedByUid.size() <= 128
+        && isValidRoleValue(data.requestedByRole)
+        && data.reviewRemarks is string && data.reviewRemarks.size() <= 300
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidSiteQrSessionPayload(data, sessionId) {
+      return data.keys().hasAll([
+          'sessionId', 'siteId', 'siteName', 'clientId', 'branchId',
+          'attendanceDate', 'shiftType', 'scheduledStartTime', 'scheduledEndTime',
+          'signedToken', 'verificationCode', 'issuedAt', 'expiresAt', 'ttlSeconds',
+          'isActive', 'generatedByUid', 'generatedByName', 'generatedByRole',
+          'scanCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'sessionId', 'siteId', 'siteName', 'clientId', 'branchId',
+          'attendanceDate', 'shiftType', 'scheduledStartTime', 'scheduledEndTime',
+          'signedToken', 'verificationCode', 'issuedAt', 'expiresAt', 'ttlSeconds',
+          'isActive', 'generatedByUid', 'generatedByName', 'generatedByRole',
+          'scanCount', 'createdAt', 'updatedAt', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && !('employeeName' in data)
+        && !('aadhaarNumber' in data)
+        && !('mobile' in data)
+        && data.sessionId == sessionId
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.attendanceDate is string && data.attendanceDate.size() == 10
+        && data.shiftType is string && data.shiftType.size() >= 2 && data.shiftType.size() <= 80
+        && data.signedToken is string && data.signedToken.size() >= 10 && data.signedToken.size() <= 1024
+        && data.verificationCode is string && data.verificationCode.size() >= 4 && data.verificationCode.size() <= 24
+        && data.ttlSeconds is int && data.ttlSeconds >= 60 && data.ttlSeconds <= 900
+        && data.isActive is bool
+        && data.generatedByUid == request.auth.uid
+        && isValidRoleValue(data.generatedByRole);
+    }
+
+    function isValidEmployeeNotificationPayload(data, notificationId) {
+      return data.keys().hasAll([
+          'notificationId', 'employeeId', 'linkedUid', 'branchId', 'siteId', 'siteName',
+          'category', 'title', 'message', 'dutyDate', 'isRead', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'notificationId', 'employeeId', 'linkedUid', 'branchId', 'siteId', 'siteName',
+          'category', 'title', 'message', 'dutyDate', 'isRead', 'createdAt', 'serverCreatedAt'
+        ])
+        && data.notificationId == notificationId
+        && data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64
+        && data.linkedUid is string && data.linkedUid.size() <= 128
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.category in [
+          'Roster Published', 'Roster Updated', 'Attendance Verified',
+          'Correction Reviewed', 'Overtime Approved'
+        ]
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && data.message is string && data.message.size() >= 2 && data.message.size() <= 400
+        && data.dutyDate is string && data.dutyDate.size() <= 10
+        && data.isRead is bool
+        && data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    function isValidAttendanceAuditLogPayload(data, auditId) {
+      return data.keys().hasAll([
+          'auditId', 'category', 'targetId', 'employeeId', 'siteId', 'branchId',
+          'action', 'previousValueSummary', 'newValueSummary', 'reason',
+          'actorUid', 'actorName', 'actorRole', 'timestamp'
+        ])
+        && data.keys().hasOnly([
+          'auditId', 'category', 'targetId', 'employeeId', 'siteId', 'branchId',
+          'action', 'previousValueSummary', 'newValueSummary', 'reason',
+          'actorUid', 'actorName', 'actorRole', 'timestamp', 'createdAt'
+        ])
+        && data.auditId == auditId
+        && data.category in ['Roster', 'Attendance', 'Geofence', 'QR', 'Correction', 'Overtime']
+        && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 64
+        && data.employeeId is string && data.employeeId.size() <= 64
+        && data.siteId is string && data.siteId.size() <= 64
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 140
+        && data.previousValueSummary is string && data.previousValueSummary.size() <= 300
+        && data.newValueSummary is string && data.newValueSummary.size() >= 2 && data.newValueSummary.size() <= 400
+        && data.reason is string && data.reason.size() <= 300
+        && data.actorUid == request.auth.uid
+        && data.actorName is string && data.actorName.size() <= 120
+        && isValidRoleValue(data.actorRole)
+        && data.timestamp is string && data.timestamp.size() <= 40;
+    }
+
+    function isValidSiteAttendanceSummaryPayload(data, summaryId) {
+      return data.keys().hasAll([
+          'summaryId', 'siteId', 'siteName', 'clientId', 'clientName', 'branchId',
+          'attendanceDate', 'totalSanctioned', 'totalDeployed',
+          'presentCount', 'lateCount', 'halfDayCount', 'absentCount',
+          'weeklyOffCount', 'leaveCount', 'pendingCount',
+          'serviceBreakdown', 'shiftBreakdown', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'summaryId', 'siteId', 'siteName', 'clientId', 'clientName', 'branchId',
+          'attendanceDate', 'totalSanctioned', 'totalDeployed',
+          'presentCount', 'lateCount', 'halfDayCount', 'absentCount',
+          'weeklyOffCount', 'leaveCount', 'pendingCount',
+          'serviceBreakdown', 'shiftBreakdown', 'updatedAt', 'serverUpdatedAt'
+        ])
+        // Strictly block employee PII, KYC, salary, and GPS coordinates in Site Portal summary
+        && !('employees' in data)
+        && !('employeeNames' in data)
+        && !('employeeName' in data)
+        && !('mobile' in data)
+        && !('phone' in data)
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && !('latitude' in data)
+        && !('longitude' in data)
+        && !('checkInGeo' in data)
+        && data.summaryId == summaryId
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 140
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.attendanceDate is string && data.attendanceDate.size() == 10
+        && data.totalSanctioned is int && data.totalSanctioned >= 0
+        && data.totalDeployed is int && data.totalDeployed >= 0
+        && data.presentCount is int && data.presentCount >= 0
+        && data.absentCount is int && data.absentCount >= 0
+        && data.serviceBreakdown is list && data.serviceBreakdown.size() <= 200
         && data.shiftBreakdown is list && data.shiftBreakdown.size() <= 100;
     }
 
@@ -656,9 +988,12 @@ service cloud.firestore {
               'employee.view', 'employee.create', 'employee.edit',
               'employee.verify_docs', 'employee.delete', 'employee.manage',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify', 'attendance.approve', 'attendance.correct'
             ])
-            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForAttendanceBranch(existing().branchId)
           )
           || (
             isFieldOfficer()
@@ -685,9 +1020,12 @@ service cloud.firestore {
               'employee.view', 'employee.create', 'employee.edit',
               'employee.verify_docs', 'employee.delete', 'employee.manage',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify', 'attendance.approve', 'attendance.correct'
             ])
-            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForAttendanceBranch(existing().branchId)
           )
           || (
             isFieldOfficer()
@@ -932,13 +1270,19 @@ service cloud.firestore {
             isHR()
             && hasAnyPermission([
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage', 'employee.view', 'employee.manage'
+              'assignment.transfer', 'assignment.manage', 'employee.view', 'employee.manage',
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify'
             ])
-            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForAttendanceBranch(existing().branchId)
           )
           || (
             isFieldOfficer()
-            && existing().siteId in callerData().assignedSiteIds
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || isAuthorizedFieldOfficerBranch(existing().branchId)
+            )
           )
           || (
             isEmployee()
@@ -1185,9 +1529,11 @@ service cloud.firestore {
             && hasAnyPermission([
               'client.view', 'client.edit', 'clients:view', 'clients:edit',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create', 'attendance.edit'
             ])
-            && isAuthorizedForBranch(existing().assignedBranch)
+            && isAuthorizedForAttendanceBranch(existing().assignedBranch)
           )
         );
 
@@ -1197,9 +1543,11 @@ service cloud.firestore {
           && hasAnyPermission([
             'client.view', 'client.edit', 'clients:view', 'clients:edit',
             'assignment.view', 'assignment.create', 'assignment.edit',
-            'assignment.transfer', 'assignment.manage'
+            'assignment.transfer', 'assignment.manage',
+            'roster.view', 'roster.create', 'roster.edit',
+            'attendance.view', 'attendance.view_all_branch', 'attendance.create', 'attendance.edit'
           ])
-          && isAuthorizedForBranch(existing().assignedBranch)
+          && isAuthorizedForAttendanceBranch(existing().assignedBranch)
         );
 
       allow create: if isValidId(clientId)
@@ -1239,11 +1587,15 @@ service cloud.firestore {
             && hasAnyPermission([
               'site.view', 'site.edit', 'sites:view', 'sites:edit',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify', 'attendance.gps_settings', 'attendance.qr_manage'
             ])
-            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForAttendanceBranch(existing().branchId)
           )
           || isAssignedToSite(siteId)
+          || isEmployee()
         );
 
       allow list: if isAdmin()
@@ -1252,9 +1604,12 @@ service cloud.firestore {
           && hasAnyPermission([
             'site.view', 'site.edit', 'sites:view', 'sites:edit',
             'assignment.view', 'assignment.create', 'assignment.edit',
-            'assignment.transfer', 'assignment.manage'
+            'assignment.transfer', 'assignment.manage',
+            'roster.view', 'roster.create', 'roster.edit', 'roster.publish',
+            'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+            'attendance.edit', 'attendance.verify', 'attendance.gps_settings', 'attendance.qr_manage'
           ])
-          && isAuthorizedForBranch(existing().branchId)
+          && isAuthorizedForAttendanceBranch(existing().branchId)
         )
         || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds);
 
@@ -1265,14 +1620,26 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/clients/$(incoming().clientId));
 
       allow update: if isValidId(siteId)
-        && hasAnyPermission(['site.edit', 'site.delete', 'sites:edit'])
         && isValidSitePayload(incoming(), siteId)
         && incoming().siteId == existing().siteId
         && isAuthorizedForBranch(existing().branchId)
         && (
-          isAdmin()
-          || hasPermission('site.delete')
-          || (existing().isArchived == false && incoming().isArchived == false)
+          (
+            hasAnyPermission(['site.edit', 'site.delete', 'sites:edit'])
+            && (
+              isAdmin()
+              || hasPermission('site.delete')
+              || (existing().isArchived == false && incoming().isArchived == false)
+            )
+          )
+          || (
+            hasPermission('attendance.gps_settings')
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'latitude', 'longitude', 'allowedRadiusMeters',
+              'gpsAccuracyThresholdMeters', 'isGpsMandatory', 'isQrEnabled',
+              'updatedAt', 'serverUpdatedAt'
+            ])
+          )
         );
 
       allow delete: if false; // Archive via isArchived = true to retain history
@@ -1292,7 +1659,9 @@ service cloud.firestore {
               'service.view', 'service.manage', 'site.view', 'site.create', 'site.edit',
               'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit',
+              'attendance.view', 'attendance.create', 'attendance.edit'
             ])
             && existing().status in ['Active', 'Inactive']
           )
@@ -1306,7 +1675,9 @@ service cloud.firestore {
             'service.view', 'service.manage', 'site.view', 'site.create', 'site.edit',
             'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
             'assignment.view', 'assignment.create', 'assignment.edit',
-            'assignment.transfer', 'assignment.manage'
+            'assignment.transfer', 'assignment.manage',
+            'roster.view', 'roster.create', 'roster.edit',
+            'attendance.view', 'attendance.create', 'attendance.edit'
           ])
           && existing().status in ['Active', 'Inactive']
         )
@@ -1348,7 +1719,9 @@ service cloud.firestore {
               'designation.view', 'designation.manage', 'site.view', 'site.create', 'site.edit',
               'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit',
+              'attendance.view', 'attendance.create', 'attendance.edit'
             ])
             && existing().status in ['Active', 'Inactive']
           )
@@ -1362,7 +1735,9 @@ service cloud.firestore {
             'designation.view', 'designation.manage', 'site.view', 'site.create', 'site.edit',
             'employee.view', 'employee.create', 'employee.edit', 'employee.manage',
             'assignment.view', 'assignment.create', 'assignment.edit',
-            'assignment.transfer', 'assignment.manage'
+            'assignment.transfer', 'assignment.manage',
+            'roster.view', 'roster.create', 'roster.edit',
+            'attendance.view', 'attendance.create', 'attendance.edit'
           ])
           && existing().status in ['Active', 'Inactive']
         )
@@ -1406,9 +1781,11 @@ service cloud.firestore {
             && hasAnyPermission([
               'site.view', 'site.edit', 'sites:view', 'sites:edit',
               'assignment.view', 'assignment.create', 'assignment.edit',
-              'assignment.transfer', 'assignment.manage'
+              'assignment.transfer', 'assignment.manage',
+              'roster.view', 'roster.create', 'roster.edit',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create', 'attendance.edit'
             ])
-            && isAuthorizedForBranch(existing().branchId)
+            && isAuthorizedForAttendanceBranch(existing().branchId)
           )
           || isAssignedToSite(existing().siteId)
         );
@@ -1419,9 +1796,11 @@ service cloud.firestore {
           && hasAnyPermission([
             'site.view', 'site.edit', 'sites:view', 'sites:edit',
             'assignment.view', 'assignment.create', 'assignment.edit',
-            'assignment.transfer', 'assignment.manage'
+            'assignment.transfer', 'assignment.manage',
+            'roster.view', 'roster.create', 'roster.edit',
+            'attendance.view', 'attendance.view_all_branch', 'attendance.create', 'attendance.edit'
           ])
-          && isAuthorizedForBranch(existing().branchId)
+          && isAuthorizedForAttendanceBranch(existing().branchId)
         )
         || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds);
 
@@ -1458,41 +1837,412 @@ service cloud.firestore {
     }
 
     // ------------------------------------------------------------------------
-    // 8. Operational Collections (Phase 1 Foundation Preserved)
+    // 8. Phase 4 Duty Roster, Attendance, Geofence/QR, Corrections & Summaries
+    //    Site Portal (`site`) has ZERO access to dutyRosters, attendance,
+    //    attendanceCorrections, attendanceQrSessions, employeeNotifications,
+    //    or attendanceAuditLogs. Site Portal reads ONLY siteAttendanceSummaries!
     // ------------------------------------------------------------------------
-    match /attendance/{recordId} {
-      allow get: if isValidId(recordId)
+    match /dutyRosters/{rosterId} {
+      allow get: if isSignedIn()
+        && isValidId(rosterId)
         && (
-          isAuthorizedForBranch(existing().branchId)
-          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
-          || (isEmployee() && existing().employeeUid == request.auth.uid)
-        );
-
-      allow list: if isAdmin()
-        || (isHR() && isAuthorizedForBranch(existing().branchId))
-        || (isEmployee() && existing().employeeUid == request.auth.uid);
-
-      allow create: if isValidId(recordId)
-        && incoming().createdAt == request.time
-        && (
-          (isEmployee() && incoming().employeeUid == request.auth.uid)
-          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
-          || isAuthorizedForBranch(incoming().branchId)
-        );
-
-      allow update: if isValidId(recordId)
-        && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time
-        && (
-          isAuthorizedForBranch(existing().branchId)
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish', 'roster.delete',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify'
+            ])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || existing().assignedFieldOfficerUid == request.auth.uid
+              || isAuthorizedFieldOfficerBranch(existing().branchId)
+            )
+          )
           || (
             isEmployee()
-            && existing().employeeUid == request.auth.uid
-            && incoming().diff(existing()).affectedKeys().hasOnly(['checkOutAt', 'status', 'updatedAt'])
+            && existing().status == 'Published'
+            && existing().linkedUid != ''
+            && existing().linkedUid == request.auth.uid
           )
         );
 
-      allow delete: if isAdmin() && isValidId(recordId);
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'roster.view', 'roster.create', 'roster.edit', 'roster.publish', 'roster.delete',
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify'
+            ])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || existing().assignedFieldOfficerUid == request.auth.uid
+              || isAuthorizedFieldOfficerBranch(existing().branchId)
+            )
+          )
+          || (
+            isEmployee()
+            && existing().status == 'Published'
+            && existing().linkedUid != ''
+            && existing().linkedUid == request.auth.uid
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(rosterId)
+        && isValidDutyRosterPayload(incoming(), rosterId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['roster.create', 'roster.publish'])
+            && isAuthorizedForBranch(incoming().branchId)
+            && (incoming().status != 'Published' || hasPermission('roster.publish'))
+            && (incoming().authorizedCapacityException == false || hasPermission('attendance.approve'))
+          )
+          || (
+            isFieldOfficer()
+            && incoming().siteId in callerData().assignedSiteIds
+            && isAuthorizedFieldOfficerBranch(incoming().branchId)
+            && incoming().authorizedCapacityException == false
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(rosterId)
+        && isValidDutyRosterPayload(incoming(), rosterId)
+        && incoming().rosterId == existing().rosterId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['roster.edit', 'roster.publish', 'roster.delete'])
+            && isAuthorizedForBranch(existing().branchId)
+            && incoming().branchId == existing().branchId
+            && (incoming().status != 'Published' || hasPermission('roster.publish'))
+            && (incoming().status != 'Cancelled' || hasAnyPermission(['roster.delete', 'roster.edit']))
+            && (
+              incoming().authorizedCapacityException == existing().authorizedCapacityException
+              || hasPermission('attendance.approve')
+            )
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+            && incoming().siteId == existing().siteId
+            && incoming().authorizedCapacityException == existing().authorizedCapacityException
+          )
+        );
+
+      allow delete: if false; // Cancel roster only (`status == 'Cancelled'`)
+    }
+
+    match /attendance/{recordId} {
+      allow get: if isSignedIn()
+        && isValidId(recordId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify', 'attendance.approve',
+              'attendance.correct', 'attendance.overtime_approve'
+            ])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+          || (
+            isEmployee()
+            && (existing().employeeUid == request.auth.uid || existing().linkedUid == request.auth.uid)
+          )
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'attendance.view', 'attendance.view_all_branch', 'attendance.create',
+              'attendance.edit', 'attendance.verify', 'attendance.approve',
+              'attendance.correct', 'attendance.overtime_approve'
+            ])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+          || (
+            isEmployee()
+            && (existing().employeeUid == request.auth.uid || existing().linkedUid == request.auth.uid)
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(recordId)
+        && isValidAttendancePayload(incoming(), recordId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'attendance.create', 'attendance.edit', 'attendance.correct', 'attendance.approve'
+            ])
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isEmployee()
+            && (incoming().employeeUid == request.auth.uid || incoming().linkedUid == request.auth.uid)
+            && incoming().isVerifiedByHr == false
+            && incoming().approvedOvertimeMinutes == 0
+            && incoming().checkInMethod in ['GPS', 'QR']
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(recordId)
+        && isValidAttendancePayload(incoming(), recordId)
+        && incoming().attendanceId == existing().attendanceId
+        && incoming().employeeId == existing().employeeId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          // Action 1: Authorized Branch HR verification, correction, manual edit, or overtime review
+          || (
+            isHR()
+            && hasAnyPermission([
+              'attendance.edit', 'attendance.verify', 'attendance.approve',
+              'attendance.correct', 'attendance.overtime_approve'
+            ])
+            && isAuthorizedForBranch(existing().branchId)
+            && incoming().branchId == existing().branchId
+          )
+          // Action 2: Field Officer site-scoped remarks ONLY
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+            && incoming().siteId == existing().siteId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'fieldOfficerRemarks', 'updatedBy', 'updatedAt', 'serverUpdatedAt'
+            ])
+          )
+          // Action 3: Employee self Check-Out ONLY before HR verification locks the record
+          || (
+            isEmployee()
+            && (existing().employeeUid == request.auth.uid || existing().linkedUid == request.auth.uid)
+            && existing().isVerifiedByHr == false
+            && existing().checkOutAt == null
+            && incoming().isVerifiedByHr == false
+            && incoming().approvedOvertimeMinutes == existing().approvedOvertimeMinutes
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'checkOutAt', 'checkOutMethod', 'checkOutGeo',
+              'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
+              'totalGrossMinutes', 'totalDutyMinutes', 'totalDutyHours',
+              'lateArrivalMinutes', 'earlyDepartureMinutes', 'overtimeMinutes',
+              'overtimeStatus', 'status', 'verificationOutcome', 'exceptionReason',
+              'updatedBy', 'updatedAt', 'serverUpdatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false; // Preserve verified payroll-grade attendance logs
+    }
+
+    match /attendanceCorrections/{correctionId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission([
+              'attendance.view', 'attendance.view_all_branch',
+              'attendance.correct', 'attendance.approve', 'attendance.verify'
+            ])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+          || (
+            isEmployee()
+            && (existing().linkedUid == request.auth.uid || existing().requestedByUid == request.auth.uid)
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(correctionId)
+        && isValidAttendanceCorrectionPayload(incoming(), correctionId)
+        && incoming().requestedByUid == request.auth.uid
+        && incoming().status == 'Pending'
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
+          || (
+            isEmployee()
+            && (incoming().linkedUid == request.auth.uid || incoming().requestedByUid == request.auth.uid)
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(correctionId)
+        && isValidAttendanceCorrectionPayload(incoming(), correctionId)
+        && existing().status == 'Pending'
+        && incoming().correctionId == existing().correctionId
+        && incoming().requestedByUid == existing().requestedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().status in ['Approved', 'Rejected']
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['attendance.correct', 'attendance.approve'])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+        )
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'reviewedByUid', 'reviewedByName', 'reviewRemarks',
+          'reviewedAt', 'updatedAt', 'serverUpdatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    match /attendanceQrSessions/{sessionId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['attendance.qr_manage', 'attendance.view', 'attendance.edit'])
+            && isAuthorizedForAttendanceBranch(existing().branchId)
+          )
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+          || (
+            isEmployee()
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || existing().branchId == callerData().branchId
+            )
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(sessionId)
+        && isValidSiteQrSessionPayload(incoming(), sessionId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasPermission('attendance.qr_manage')
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && incoming().siteId in callerData().assignedSiteIds
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(sessionId)
+        && isValidSiteQrSessionPayload(incoming(), sessionId)
+        && incoming().sessionId == existing().sessionId
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasPermission('attendance.qr_manage')
+            && isAuthorizedForBranch(existing().branchId)
+          )
+          || (
+            isFieldOfficer()
+            && existing().siteId in callerData().assignedSiteIds
+          )
+        )
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'isActive', 'scanCount', 'updatedAt', 'serverUpdatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    match /employeeNotifications/{notificationId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForAttendanceBranch(existing().branchId))
+          || (isEmployee() && existing().linkedUid == request.auth.uid)
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(notificationId)
+        && isValidEmployeeNotificationPayload(incoming(), notificationId)
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(notificationId)
+        && (
+          isAdmin()
+          || (
+            isEmployee()
+            && existing().linkedUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
+            && incoming().isRead is bool
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /attendanceAuditLogs/{auditId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForAttendanceBranch(existing().branchId))
+          || (isFieldOfficer() && existing().siteId in callerData().assignedSiteIds)
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(auditId)
+        && isValidAttendanceAuditLogPayload(incoming(), auditId)
+        && !isSiteManager();
+
+      allow update, delete: if false; // Strictly immutable append-only audit trail
+    }
+
+    match /siteAttendanceSummaries/{summaryId} {
+      allow get, list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForAttendanceBranch(existing().branchId))
+          || ((isFieldOfficer() || isSiteManager()) && existing().siteId in callerData().assignedSiteIds)
+        );
+
+      allow create, update: if isSignedIn()
+        && isValidId(summaryId)
+        && isValidSiteAttendanceSummaryPayload(incoming(), summaryId)
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
+          || (isEmployee() && incoming().branchId == callerData().branchId)
+        );
+
+      allow delete: if false;
     }
 
     match /siteSummaries/{siteId} {

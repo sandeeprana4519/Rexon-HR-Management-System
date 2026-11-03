@@ -15,13 +15,16 @@ import { ProfilePage } from '../pages/common/ProfilePage';
 import { UnauthorizedPage } from '../pages/common/UnauthorizedPage';
 import { EmployeeDashboard } from '../pages/employee/EmployeeDashboard';
 import { MyAssignmentsPage } from '../pages/employee/MyAssignmentsPage';
+import { MyAttendancePage } from '../pages/employee/MyAttendancePage';
 import { FieldOfficerDashboard } from '../pages/fieldOfficer/FieldOfficerDashboard';
 import { HRDashboard } from '../pages/hr/HRDashboard';
 import { ServiceAndDesignationPage } from '../pages/hr/ServiceAndDesignationPage';
 import { ApprovalsPage } from '../pages/shared/ApprovalsPage';
+import { AttendanceManagementPage } from '../pages/shared/AttendanceManagementPage';
 import { ClientManagementPage } from '../pages/shared/ClientManagementPage';
 import { DeploymentDashboardPage } from '../pages/shared/DeploymentDashboardPage';
 import { DesignationManagementPage } from '../pages/shared/DesignationManagementPage';
+import { DutyRosterPage } from '../pages/shared/DutyRosterPage';
 import { EmployeeAvailabilityPage } from '../pages/shared/EmployeeAvailabilityPage';
 import { EmployeeManagementPage } from '../pages/shared/EmployeeManagementPage';
 import { EmployeeProfilePage } from '../pages/shared/EmployeeProfilePage';
@@ -29,6 +32,7 @@ import { MasterReportsPage } from '../pages/shared/MasterReportsPage';
 import { ServiceManagementPage } from '../pages/shared/ServiceManagementPage';
 import { SiteAssignmentPage } from '../pages/shared/SiteAssignmentPage';
 import { SiteManagementPage } from '../pages/shared/SiteManagementPage';
+import { SiteAttendanceSummaryPage } from '../pages/site/SiteAttendanceSummaryPage';
 import { SiteDashboard } from '../pages/site/SiteDashboard';
 import { SiteManpowerSummaryPage } from '../pages/site/SiteManpowerSummaryPage';
 import { PORTAL_METADATA, hasUserPermission } from '../utils/portalConfig';
@@ -124,6 +128,8 @@ export const AppRoutes: React.FC = () => {
         <Route path="employees" element={<EmployeeManagementPage />} />
         <Route path="employees/:employeeId" element={<EmployeeProfilePage />} />
         <Route path="assignments" element={<SiteAssignmentPage />} />
+        <Route path="rosters" element={<DutyRosterPage />} />
+        <Route path="attendance" element={<AttendanceManagementPage />} />
         <Route path="deployment" element={<DeploymentDashboardPage />} />
         <Route path="availability" element={<EmployeeAvailabilityPage />} />
         <Route path="services" element={<ServiceManagementPage />} />
@@ -196,6 +202,35 @@ export const AppRoutes: React.FC = () => {
           }
         />
         <Route
+          path="rosters"
+          element={
+            <HRPermissionGuard
+              anyOf={['roster.view', 'roster.create', 'roster.edit', 'roster.publish']}
+              moduleLabel="Duty Roster Management"
+            >
+              <DutyRosterPage />
+            </HRPermissionGuard>
+          }
+        />
+        <Route
+          path="attendance"
+          element={
+            <HRPermissionGuard
+              anyOf={[
+                'attendance.view',
+                'attendance.create',
+                'attendance.edit',
+                'attendance.verify',
+                'attendance.approve',
+                'attendance.correct',
+              ]}
+              moduleLabel="Attendance & Duty Management"
+            >
+              <AttendanceManagementPage />
+            </HRPermissionGuard>
+          }
+        />
+        <Route
           path="deployment"
           element={
             <HRPermissionGuard
@@ -254,6 +289,8 @@ export const AppRoutes: React.FC = () => {
       >
         <Route index element={<FieldOfficerDashboard section="overview" />} />
         <Route path="assignments" element={<SiteAssignmentPage />} />
+        <Route path="rosters" element={<DutyRosterPage />} />
+        <Route path="attendance" element={<AttendanceManagementPage />} />
         <Route path="deployment" element={<DeploymentDashboardPage />} />
         <Route path="availability" element={<EmployeeAvailabilityPage />} />
         <Route path="employees" element={<EmployeeManagementPage fieldOfficerView />} />
@@ -275,7 +312,7 @@ export const AppRoutes: React.FC = () => {
       >
         <Route index element={<SiteDashboard section="overview" />} />
         <Route path="manpower" element={<SiteManpowerSummaryPage />} />
-        <Route path="attendance" element={<SiteDashboard section="attendance" />} />
+        <Route path="attendance" element={<SiteAttendanceSummaryPage />} />
         <Route path="billing" element={<SiteDashboard section="billing" />} />
         <Route path="reports" element={<SiteDashboard section="reports" />} />
         <Route path="profile" element={<ProfilePage />} />
@@ -293,7 +330,7 @@ export const AppRoutes: React.FC = () => {
         <Route index element={<EmployeeDashboard section="overview" />} />
         <Route path="assignments" element={<MyAssignmentsPage />} />
         <Route path="my-record" element={<EmployeeProfilePage selfView />} />
-        <Route path="attendance" element={<EmployeeDashboard section="attendance" />} />
+        <Route path="attendance" element={<MyAttendancePage />} />
         <Route path="requests" element={<EmployeeDashboard section="requests" />} />
         <Route path="documents" element={<EmployeeDashboard section="documents" />} />
         <Route path="profile" element={<ProfilePage />} />

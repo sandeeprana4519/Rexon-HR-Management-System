@@ -220,7 +220,7 @@ export const PermissionManagementPage: React.FC = () => {
             HR Permission &amp; Branch Scope Governance
           </h1>
           <p className="mt-1 text-sm text-[#574B43]">
-            Assign any of the 23 granular dot-notation permissions and branch boundaries per HR
+            Assign any of the {HR_PERMISSIONS.length} granular dot-notation permissions and branch boundaries per HR
             account. Enforced simultaneously in UI routes, backend API, and Firestore Security Rules.
           </p>
         </div>
@@ -357,7 +357,7 @@ export const PermissionManagementPage: React.FC = () => {
                     <div className="mt-1 font-semibold text-sm text-[#1F1916]">{hr.fullName}</div>
                     <div className="text-xs text-[#574B43]">{hr.hrDesignation}</div>
                     <div className="mt-2 pt-2 border-t border-[#E5DDD2] flex items-center justify-between text-[11px] text-[#7D6F65] font-mono-tabular">
-                      <span>{permCount} / 23 perms</span>
+                      <span>{permCount} / {HR_PERMISSIONS.length} perms</span>
                       <span>{hr.assignedBranches.length} branch(es)</span>
                     </div>
                   </button>
@@ -454,7 +454,7 @@ export const PermissionManagementPage: React.FC = () => {
                         }}
                         className="text-xs font-semibold text-[#5C3D2E] hover:underline"
                       >
-                        Grant All 23
+                        Grant All {HR_PERMISSIONS.length}
                       </button>
                       <span className="text-[#D4C7B8]">|</span>
                       <button

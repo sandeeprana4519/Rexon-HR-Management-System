@@ -96,6 +96,22 @@ export const HR_PERMISSIONS = [
   'payroll.view',
   'payroll.manage',
   'reports.view',
+  'attendance.view',
+  'attendance.view_all_branch',
+  'attendance.create',
+  'attendance.edit',
+  'attendance.verify',
+  'attendance.approve',
+  'attendance.correct',
+  'attendance.export',
+  'roster.view',
+  'roster.create',
+  'roster.edit',
+  'roster.publish',
+  'roster.delete',
+  'attendance.qr_manage',
+  'attendance.gps_settings',
+  'attendance.overtime_approve',
 ] as const;
 
 export type HRPermissionKey = (typeof HR_PERMISSIONS)[number];
@@ -349,6 +365,117 @@ export const HR_PERMISSION_GROUPS: {
       },
     ],
   },
+  {
+    module: 'Duty Roster Management (Phase 4)',
+    items: [
+      {
+        key: 'roster.view',
+        label: 'View Duty Rosters',
+        module: 'Roster',
+        description: 'Inspect daily, weekly, and monthly shift rosters across authorized sites.',
+      },
+      {
+        key: 'roster.create',
+        label: 'Create Draft Duty Rosters',
+        module: 'Roster',
+        description: 'Generate daily, weekly, and monthly shift schedules including overnight duties.',
+      },
+      {
+        key: 'roster.edit',
+        label: 'Edit Duty Rosters',
+        module: 'Roster',
+        description: 'Modify draft or published shift timings, instructions, and Field Officer assignments.',
+      },
+      {
+        key: 'roster.publish',
+        label: 'Publish Rosters & Notify Workforce',
+        module: 'Roster',
+        description: 'Publish validated duty rosters so shifts appear in Employee & Field Officer portals.',
+      },
+      {
+        key: 'roster.delete',
+        label: 'Cancel / Delete Duty Rosters',
+        module: 'Roster',
+        description: 'Cancel or remove draft/erroneous duty roster entries with mandatory audit reason.',
+        sensitive: true,
+      },
+    ],
+  },
+  {
+    module: 'Attendance, Geofence, QR & Overtime (Phase 4)',
+    items: [
+      {
+        key: 'attendance.view',
+        label: 'View Branch Attendance',
+        module: 'Attendance',
+        description: 'Inspect daily, weekly, and monthly attendance logs within assigned branches.',
+      },
+      {
+        key: 'attendance.view_all_branch',
+        label: 'View Multi-Branch Attendance Rollups',
+        module: 'Attendance',
+        description: 'Cross-branch attendance inspection for senior HR leadership.',
+        sensitive: true,
+      },
+      {
+        key: 'attendance.create',
+        label: 'Record Attendance Entries',
+        module: 'Attendance',
+        description: 'Log Weekly Off, Holiday, Leave, Absent, or manual verified attendance entries.',
+      },
+      {
+        key: 'attendance.edit',
+        label: 'Edit Attendance Status & Remarks',
+        module: 'Attendance',
+        description: 'Update non-locked attendance records and record operational HR remarks.',
+      },
+      {
+        key: 'attendance.verify',
+        label: 'Verify Daily Attendance',
+        module: 'Attendance',
+        description: 'Verify GPS/QR check-ins and publish sanitized site turnout counts.',
+      },
+      {
+        key: 'attendance.approve',
+        label: 'Approve Exceptions & Capacity Overrides',
+        module: 'Attendance',
+        description: 'Final approval authority for geofence exceptions and sanctioned roster overrides.',
+        sensitive: true,
+      },
+      {
+        key: 'attendance.correct',
+        label: 'Process Missing Punch & Corrections',
+        module: 'Attendance',
+        description: 'Review and apply employee missing check-in/out and time correction requests.',
+      },
+      {
+        key: 'attendance.overtime_approve',
+        label: 'Approve Employee Overtime',
+        module: 'Attendance',
+        description: 'Approve or reject extra duty hours worked beyond scheduled shift duration.',
+        sensitive: true,
+      },
+      {
+        key: 'attendance.qr_manage',
+        label: 'Generate & Manage Site Shift QR Codes',
+        module: 'Attendance',
+        description: 'Issue time-limited rotating QR verification sessions for site shifts.',
+      },
+      {
+        key: 'attendance.gps_settings',
+        label: 'Configure Site Geofence & GPS Thresholds',
+        module: 'Attendance',
+        description: 'Update site latitude, longitude, allowed radius (meters), and GPS accuracy rules.',
+        sensitive: true,
+      },
+      {
+        key: 'attendance.export',
+        label: 'Export Attendance CSV / Excel Reports',
+        module: 'Attendance',
+        description: 'Download daily, weekly, and monthly attendance registers for payroll and audits.',
+      },
+    ],
+  },
 ];
 
 export const PERMISSION_PROFILES = [
@@ -377,6 +504,17 @@ export const PERMISSION_PROFILE_MAP: Record<PermissionProfileName, HRPermissionK
     'employee.manage',
     'assignment.view',
     'assignment.manage',
+    'roster.view',
+    'roster.create',
+    'roster.edit',
+    'roster.publish',
+    'attendance.view',
+    'attendance.create',
+    'attendance.edit',
+    'attendance.verify',
+    'attendance.correct',
+    'attendance.qr_manage',
+    'attendance.export',
     'billing.view',
     'billing.manage',
     'payroll.view',
@@ -397,6 +535,8 @@ export const PERMISSION_PROFILE_MAP: Record<PermissionProfileName, HRPermissionK
     'assignment.create',
     'assignment.edit',
     'assignment.transfer',
+    'roster.view',
+    'attendance.view',
     'reports.view',
   ],
   'Site HR & Attendance': [
@@ -409,6 +549,15 @@ export const PERMISSION_PROFILE_MAP: Record<PermissionProfileName, HRPermissionK
     'employee.manage',
     'assignment.view',
     'assignment.manage',
+    'roster.view',
+    'roster.create',
+    'roster.edit',
+    'roster.publish',
+    'attendance.view',
+    'attendance.create',
+    'attendance.verify',
+    'attendance.correct',
+    'attendance.qr_manage',
     'reports.view',
   ],
   'Accounts & Billing Only': [
@@ -418,6 +567,8 @@ export const PERMISSION_PROFILE_MAP: Record<PermissionProfileName, HRPermissionK
     'service.view',
     'designation.view',
     'assignment.view',
+    'attendance.view',
+    'attendance.export',
     'billing.view',
     'billing.manage',
     'payroll.view',
@@ -432,6 +583,8 @@ export const PERMISSION_PROFILE_MAP: Record<PermissionProfileName, HRPermissionK
     'designation.view',
     'employee.view',
     'assignment.view',
+    'roster.view',
+    'attendance.view',
     'reports.view',
   ],
   'Custom Granular Profile': ['client.view', 'site.view', 'service.view', 'designation.view'],
@@ -570,6 +723,12 @@ export interface SiteRecord {
   state: string;
   pinCode: string;
   googleMapsLocation: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  allowedRadiusMeters?: number;
+  gpsAccuracyThresholdMeters?: number;
+  isGpsMandatory?: boolean;
+  isQrEnabled?: boolean;
   siteContactPerson: string;
   siteManagerName: string;
   managerMobile: string;
@@ -747,6 +906,9 @@ export const APPROVAL_REQUEST_TYPES = [
   'Field Officer Replacement Request',
   'Field Officer Transfer Request',
   'Manpower Shortage Escalation',
+  'Roster Capacity Exception',
+  'Attendance Correction Approval',
+  'Overtime Approval Request',
   'Permission Change Request',
   'Branch Scope Exception',
 ] as const;
@@ -761,6 +923,8 @@ export interface ApprovalRequestRecord {
     | 'Site'
     | 'Employee'
     | 'Assignment'
+    | 'Roster'
+    | 'Attendance'
     | 'Permissions'
     | 'Branch'
     | 'Service'
@@ -807,6 +971,8 @@ export type AuditModuleName =
   | 'Designation'
   | 'Employee'
   | 'Assignment'
+  | 'Roster'
+  | 'Attendance'
   | 'Permissions'
   | 'Approvals';
 

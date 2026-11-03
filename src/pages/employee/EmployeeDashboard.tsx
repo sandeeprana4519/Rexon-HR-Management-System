@@ -1,18 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   BadgeCheck,
+  Bell,
   CalendarCheck,
   Clock,
   FileText,
   LogIn,
-  LogOut,
   MapPin,
   Plus,
+  QrCode,
   Wallet,
   X,
 } from 'lucide-react';
-import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTableToolbar } from '../../components/DataTableToolbar';
 import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
@@ -23,10 +23,19 @@ import {
   subscribeDeploymentData,
 } from '../../services/firestore/assignmentService';
 import {
+  getEmployeeTodayDutyContext,
+  listAttendanceRecords,
+  subscribeAttendanceData,
+} from '../../services/firestore/attendanceService';
+import {
   ZERO_METRICS,
   fetchLivePortalMetrics,
 } from '../../services/firestore/portalMetricsService';
-import { EmployeeAssignmentRecord } from '../../types';
+import {
+  AttendanceRecord,
+  EmployeeAssignmentRecord,
+  EmployeeTodayDutyContext,
+} from '../../types';
 import { getTodayIsoDate, isAssignmentActiveOnDate } from '../../utils/deploymentValidation';
 import {
   validatePositiveAmount,
@@ -84,13 +93,10 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
     setShowSampleLayoutData,
   } = useAuth();
 
+  const navigate = useNavigate();
   const [liveCounts, setLiveCounts] = useState(ZERO_METRICS);
-  const [checkedInAt, setCheckedInAt] = useState<string | null>(null);
-  const [checkedOutAt, setCheckedOutAt] = useState<string | null>(null);
-  const [pendingPunchAction, setPendingPunchAction] = useState<'check_in' | 'check_out' | null>(
-    null
-  );
-  const [punchNotice, setPunchNotice] = useState<string | null>(null);
+  const [dutyContext, setDutyContext] = useState<EmployeeTodayDutyContext | null>(null);
+  const [myAttendanceRecords, setMyAttendanceRecords] = useState<AttendanceRecord[]>([]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('ALL');
@@ -128,9 +134,20 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
     if (!user) return;
     const load = () => {
       void listMyEmployeeAssignments(user, isPreviewSession).then(setMyAssignments);
+      void getEmployeeTodayDutyContext(user, isPreviewSession)
+        .then(setDutyContext)
+        .catch(() => setDutyContext(null));
+      void listAttendanceRecords(user, isPreviewSession)
+        .then(setMyAttendanceRecords)
+        .catch(() => setMyAttendanceRecords([]));
     };
     load();
-    return subscribeDeploymentData(load);
+    const unsubDeploy = subscribeDeploymentData(load);
+    const unsubAtt = subscribeAttendanceData(load);
+    return () => {
+      unsubDeploy();
+      unsubAtt();
+    };
   }, [user, isPreviewSession]);
 
   const useSample = isPreviewSession && showSampleLayoutData;
@@ -138,11 +155,39 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
     const today = getTodayIsoDate();
     return myAssignments.find((a) => isAssignmentActiveOnDate(a, today));
   }, [myAssignments]);
+
+  const activeRoster = dutyContext?.activeRoster ?? null;
+  const activeAttendance =
+    dutyContext?.openOvernightAttendance ?? dutyContext?.todayAttendance ?? null;
+
   const currentSite =
-    activeDutyToday?.siteName ?? user?.assignedSiteIds[0] ?? 'Not Assigned';
+    activeRoster?.siteName ??
+    activeDutyToday?.siteName ??
+    user?.assignedSiteIds[0] ??
+    'Not Assigned';
+
+  const formattedCheckIn = activeAttendance?.checkInAt
+    ? new Date(activeAttendance.checkInAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
+  const formattedCheckOut = activeAttendance?.checkOutAt
+    ? new Date(activeAttendance.checkOutAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
 
   const summaryStats = useMemo(() => {
-    if (useSample) {
+    const currentMonthPrefix = getTodayIsoDate().slice(0, 7);
+    const monthPresentDays = myAttendanceRecords.filter(
+      (r) =>
+        r.attendanceDate.startsWith(currentMonthPrefix) &&
+        (r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day')
+    ).length;
+
+    if (useSample && myAttendanceRecords.length === 0) {
       return {
         presentDays: 22,
         leaveRequests: 1,
@@ -151,12 +196,12 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
       };
     }
     return {
-      presentDays: checkedInAt ? 1 : 0,
+      presentDays: monthPresentDays,
       leaveRequests: liveCounts.leaveRequestsCount,
       advanceRequests: liveCounts.advanceRequestsCount,
       salarySlips: 0,
     };
-  }, [useSample, checkedInAt, liveCounts]);
+  }, [useSample, myAttendanceRecords, liveCounts]);
 
   const filteredItems = useMemo(() => {
     const source = useSample ? SAMPLE_EMPLOYEE_ITEMS : [];
@@ -180,27 +225,6 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
   useEffect(() => {
     setPage(1);
   }, [searchQuery, activeTab, useSample]);
-
-  const handleConfirmPunch = () => {
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    if (pendingPunchAction === 'check_in') {
-      setCheckedInAt(nowTime);
-      setCheckedOutAt(null);
-      setPunchNotice(
-        isFirebaseConfigured
-          ? `Check-in timestamp (${nowTime}) recorded locally; full biometric/GPS attendance persistence connects in Phase 2.`
-          : `Development Preview Mode: Simulated Check-In at ${nowTime} (no Firestore write performed).`
-      );
-    } else if (pendingPunchAction === 'check_out') {
-      setCheckedOutAt(nowTime);
-      setPunchNotice(
-        isFirebaseConfigured
-          ? `Check-out timestamp (${nowTime}) recorded locally; full attendance module persistence connects in Phase 2.`
-          : `Development Preview Mode: Simulated Check-Out at ${nowTime} (no Firestore write performed).`
-      );
-    }
-    setPendingPunchAction(null);
-  };
 
   const handleRequestSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -286,16 +310,21 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
         </div>
       </div>
 
-      {punchNotice && (
+      {dutyContext && dutyContext.unreadNotificationsCount > 0 && (
         <div className="p-4 rounded-xl bg-[#F3EDE4] border border-[#D4C7B8] text-xs text-[#4A3023] flex items-center justify-between gap-4">
-          <span>{punchNotice}</span>
-          <button
-            type="button"
-            onClick={() => setPunchNotice(null)}
-            className="text-[#5C3D2E] font-semibold shrink-0"
+          <div className="flex items-center gap-2">
+            <Bell className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            <span>
+              You have <strong>{dutyContext.unreadNotificationsCount}</strong> unread roster or
+              attendance notification{dutyContext.unreadNotificationsCount === 1 ? '' : 's'}.
+            </span>
+          </div>
+          <Link
+            to="/employee/attendance"
+            className="text-[#5C3D2E] font-semibold whitespace-nowrap shrink-0 hover:underline"
           >
-            Dismiss
-          </button>
+            View in Attendance
+          </Link>
         </div>
       )}
 
@@ -360,18 +389,22 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
                 <span>Today&apos;s Duty Roster</span>
               </div>
               <p className="mt-1 font-mono-tabular text-sm font-semibold text-[#1F1916]">
-                {activeDutyToday
-                  ? `${activeDutyToday.shift} (${activeDutyToday.shiftStartTime}–${activeDutyToday.shiftEndTime})`
-                  : useSample
-                    ? 'Shift A · 06:00 – 14:00'
-                    : 'No Active Shift Today'}
+                {activeRoster
+                  ? `${activeRoster.shiftType} (${activeRoster.dutyStartTime}–${activeRoster.dutyEndTime}${activeRoster.crossesMidnight ? ' +1d' : ''})`
+                  : activeDutyToday
+                    ? `${activeDutyToday.shift} (${activeDutyToday.shiftStartTime}–${activeDutyToday.shiftEndTime})`
+                    : useSample
+                      ? 'Shift A · 06:00 – 14:00'
+                      : 'No Active Shift Today'}
               </p>
               <p className="text-xs text-[#574B43]">
-                {activeDutyToday
-                  ? `Report ${activeDutyToday.reportingTime} · Off: ${activeDutyToday.weeklyOff}`
-                  : useSample
-                    ? '[Sample] Reporting to Field Officer'
-                    : 'Standard shift roster'}
+                {activeRoster
+                  ? `Report ${activeRoster.reportingTime} · Roster ${activeRoster.rosterId}`
+                  : activeDutyToday
+                    ? `Report ${activeDutyToday.reportingTime} · Off: ${activeDutyToday.weeklyOff}`
+                    : useSample
+                      ? '[Sample] Reporting to Field Officer'
+                      : 'Standard shift roster'}
               </p>
             </div>
           </div>
@@ -382,49 +415,57 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-semibold text-[#1F1916]">
-                Duty Check-In / Check-Out
+                GPS &amp; Shift QR Attendance
               </h2>
               <BadgeCheck className="w-5 h-5 text-[#5C3D2E]" />
             </div>
             <p className="mt-1 text-xs text-[#574B43]">
-              Record shift arrival and completion for your assigned deployment post.
+              Verify duty arrival and departure via one-shot site geofence GPS or rotating Shift QR.
             </p>
           </div>
 
-          <div className="bg-white border border-[#E5DDD2] rounded-lg p-3.5 grid grid-cols-2 gap-3 text-xs">
+          <div className="bg-white border border-[#E5DDD2] rounded-lg p-3.5 grid grid-cols-3 gap-3 text-xs">
             <div>
-              <span className="text-[#7D6F65] block">Check-In Time</span>
+              <span className="text-[#7D6F65] block">Check-In</span>
               <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
-                {checkedInAt ?? '— : —'}
+                {formattedCheckIn ?? '— : —'}
               </span>
             </div>
             <div>
-              <span className="text-[#7D6F65] block">Check-Out Time</span>
+              <span className="text-[#7D6F65] block">Check-Out</span>
               <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
-                {checkedOutAt ?? '— : —'}
+                {formattedCheckOut ?? '— : —'}
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7D6F65] block">Status</span>
+              <span className="font-mono-tabular text-sm font-semibold text-[#5C3D2E]">
+                {activeAttendance?.status ?? 'Not Marked'}
               </span>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
               type="button"
-              disabled={Boolean(checkedInAt && !checkedOutAt)}
-              onClick={() => setPendingPunchAction('check_in')}
-              className="min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-45 transition-colors whitespace-nowrap"
+              onClick={() => navigate('/employee/attendance')}
+              className="min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap"
             >
               <LogIn className="w-4 h-4 shrink-0" />
-              <span>Check In</span>
+              <span>
+                {activeAttendance?.checkInAt && !activeAttendance?.checkOutAt
+                  ? 'Proceed to Check-Out'
+                  : 'Open GPS Check-In'}
+              </span>
             </button>
 
             <button
               type="button"
-              disabled={!checkedInAt || Boolean(checkedOutAt)}
-              onClick={() => setPendingPunchAction('check_out')}
-              className="min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#FAF8F5] disabled:opacity-45 transition-colors whitespace-nowrap"
+              onClick={() => navigate('/employee/attendance')}
+              className="min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#FAF8F5] transition-colors whitespace-nowrap"
             >
-              <LogOut className="w-4 h-4 text-[#5C3D2E] shrink-0" />
-              <span>Check Out</span>
+              <QrCode className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+              <span>Shift QR / History</span>
             </button>
           </div>
         </section>
@@ -664,19 +705,6 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
           </div>
         </div>
       )}
-
-      <ConfirmDialog
-        open={Boolean(pendingPunchAction)}
-        title={pendingPunchAction === 'check_in' ? 'Confirm Duty Check-In' : 'Confirm Duty Check-Out'}
-        description={
-          pendingPunchAction === 'check_in'
-            ? `Record your shift Check-In for site ${currentSite}?`
-            : `Record your shift Check-Out for site ${currentSite}?`
-        }
-        confirmLabel={pendingPunchAction === 'check_in' ? 'Confirm Check-In' : 'Confirm Check-Out'}
-        onConfirm={handleConfirmPunch}
-        onCancel={() => setPendingPunchAction(null)}
-      />
     </div>
   );
 };

@@ -31,7 +31,7 @@ interface PortalLoginPageProps {
 export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) => {
   const portal = getPortalByRole(portalRole);
   const currentDemo = DEMO_ACCOUNTS[portalRole];
-  const { user, loginWithEmail, logout } = useAuth();
+  const { user, isFirebaseConfigured, loginWithEmail, logout } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState('');
@@ -201,7 +201,7 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder={currentDemo.email}
+                  placeholder={isFirebaseConfigured ? 'name@rexonsecurity.com' : currentDemo.email}
                   className="w-full min-h-[46px] pl-10 pr-4 py-2.5 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg text-[#1F1916] placeholder:text-[#7D6F65] focus:outline-none focus:bg-white focus:border-[#5C3D2E] transition-colors"
                   required
                 />
@@ -261,76 +261,78 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
             </button>
           </form>
 
-          {/* Temporary Demo ID & Password Section for Testing */}
-          <div className="mt-6 pt-5 border-t border-[#E5DDD2]">
-            <div className="bg-[#FAF8F5] border border-[#D4C7B8] rounded-xl p-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-[#4A3023]">
-                  <KeyRound className="w-3.5 h-3.5 text-[#5C3D2E] shrink-0" />
-                  <span>Demo Login Credentials (For Testing)</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleAutoFillDemo(currentDemo.email, currentDemo.password)}
-                  className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-[#5C3D2E] text-[11px] font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap"
-                >
-                  {filledFeedback ? (
-                    <>
-                      <Check className="w-3 h-3" />
-                      <span>Filled</span>
-                    </>
-                  ) : (
-                    <span>Auto-Fill {portal.shortTitle}</span>
-                  )}
-                </button>
-              </div>
-
-              {/* Active Portal Highlighted Demo Credentials */}
-              <div className="mt-3 p-3 rounded-lg bg-white border border-[#E5DDD2] space-y-1.5 text-xs">
+          {/* Demo ID & Password Section — Strictly shown only in local Development Preview Mode */}
+          {!isFirebaseConfigured && (
+            <div className="mt-6 pt-5 border-t border-[#E5DDD2]">
+              <div className="bg-[#FAF8F5] border border-[#D4C7B8] rounded-xl p-4">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[#574B43]">{portal.shortTitle} ID:</span>
-                  <code className="font-mono-tabular font-semibold text-[#1F1916]">
-                    {currentDemo.email}
-                  </code>
+                  <div className="flex items-center gap-2 text-xs font-semibold text-[#4A3023]">
+                    <KeyRound className="w-3.5 h-3.5 text-[#5C3D2E] shrink-0" />
+                    <span>Demo Login Credentials (For Testing)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleAutoFillDemo(currentDemo.email, currentDemo.password)}
+                    className="min-h-[34px] inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-[#5C3D2E] text-[11px] font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap"
+                  >
+                    {filledFeedback ? (
+                      <>
+                        <Check className="w-3 h-3" />
+                        <span>Filled</span>
+                      </>
+                    ) : (
+                      <span>Auto-Fill {portal.shortTitle}</span>
+                    )}
+                  </button>
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[#574B43]">Demo Password:</span>
-                  <code className="font-mono-tabular font-semibold text-[#5C3D2E]">
-                    {currentDemo.password}
-                  </code>
-                </div>
-              </div>
 
-              {/* All 5 Portals Demo Reference Table */}
-              <div className="mt-3 pt-2.5 border-t border-[#E5DDD2]">
-                <p className="text-[11px] font-medium text-[#7D6F65] mb-2">
-                  All Portals Demo IDs (Password for all:{' '}
-                  <code className="font-mono-tabular font-semibold text-[#4A3023]">
-                    {DEMO_SHARED_PASSWORD}
-                  </code>
-                  ):
-                </p>
-                <div className="space-y-1.5">
-                  {DEMO_ACCOUNT_LIST.map((acct) => {
-                    const isSelected = acct.role === portalRole;
-                    return (
-                      <div
-                        key={acct.role}
-                        className={`flex items-center justify-between gap-2 text-xs py-1 px-2 rounded ${
-                          isSelected ? 'bg-[#F3EDE4] font-semibold text-[#1F1916]' : 'text-[#574B43]'
-                        }`}
-                      >
-                        <span className="truncate">{acct.portalLabel}</span>
-                        <code className="font-mono-tabular text-[#1F1916] shrink-0">
-                          {acct.email}
-                        </code>
-                      </div>
-                    );
-                  })}
+                {/* Active Portal Highlighted Demo Credentials */}
+                <div className="mt-3 p-3 rounded-lg bg-white border border-[#E5DDD2] space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#574B43]">{portal.shortTitle} ID:</span>
+                    <code className="font-mono-tabular font-semibold text-[#1F1916]">
+                      {currentDemo.email}
+                    </code>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#574B43]">Demo Password:</span>
+                    <code className="font-mono-tabular font-semibold text-[#5C3D2E]">
+                      {currentDemo.password}
+                    </code>
+                  </div>
+                </div>
+
+                {/* All 5 Portals Demo Reference Table */}
+                <div className="mt-3 pt-2.5 border-t border-[#E5DDD2]">
+                  <p className="text-[11px] font-medium text-[#7D6F65] mb-2">
+                    All Portals Demo IDs (Password for all:{' '}
+                    <code className="font-mono-tabular font-semibold text-[#4A3023]">
+                      {DEMO_SHARED_PASSWORD}
+                    </code>
+                    ):
+                  </p>
+                  <div className="space-y-1.5">
+                    {DEMO_ACCOUNT_LIST.map((acct) => {
+                      const isSelected = acct.role === portalRole;
+                      return (
+                        <div
+                          key={acct.role}
+                          className={`flex items-center justify-between gap-2 text-xs py-1 px-2 rounded ${
+                            isSelected ? 'bg-[#F3EDE4] font-semibold text-[#1F1916]' : 'text-[#574B43]'
+                          }`}
+                        >
+                          <span className="truncate">{acct.portalLabel}</span>
+                          <code className="font-mono-tabular text-[#1F1916] shrink-0">
+                            {acct.email}
+                          </code>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
         </section>
       </main>
 

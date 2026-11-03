@@ -288,9 +288,10 @@ export function validateSiteForm(
 
   const mapsVal = input.googleMapsLocation.trim();
   if (mapsVal) {
-    const isUrl = /^https?:\/\/(www\.)?(google\.[a-z.]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps)/i.test(
-      mapsVal
-    );
+    const isUrl =
+      /^https?:\/\/((www\.)?google\.[a-z.]+\/maps|maps\.google\.[a-z.]+|maps\.app\.goo\.gl|goo\.gl\/maps)/i.test(
+        mapsVal
+      );
     const isCoord = COORD_REGEX.test(mapsVal);
     if (!isUrl && !isCoord) {
       return {

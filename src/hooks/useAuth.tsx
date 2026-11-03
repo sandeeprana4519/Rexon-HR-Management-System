@@ -53,24 +53,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [showSampleLayoutData, setShowSampleLayoutData] = useState<boolean>(true);
 
   useEffect(() => {
-    const savedDemoRole = loadPreviewRoleSession();
-    if (savedDemoRole) {
-      const base = buildDemoProfileByRole(savedDemoRole);
-      const { user: resolved, accountStatus } = resolvePreviewHRUserOverlay(base);
-      if (accountStatus !== 'Active') {
-        void executeLogout(savedDemoRole);
-        setAuthError(`This HR account is currently marked ${accountStatus} by Administration.`);
-        setUser(null);
-      } else {
-        setUser(resolved);
-        setIsPreviewSession(true);
-        setShowSampleLayoutData(true);
+    if (!isFirebaseConfigured) {
+      const savedDemoRole = loadPreviewRoleSession();
+      if (savedDemoRole) {
+        const base = buildDemoProfileByRole(savedDemoRole);
+        const { user: resolved, accountStatus } = resolvePreviewHRUserOverlay(base);
+        if (accountStatus !== 'Active') {
+          void executeLogout(savedDemoRole);
+          setAuthError(`This HR account is currently marked ${accountStatus} by Administration.`);
+          setUser(null);
+        } else {
+          setUser(resolved);
+          setIsPreviewSession(true);
+          setShowSampleLayoutData(true);
+        }
+        setLoading(false);
+        return;
       }
+
       setLoading(false);
       return;
     }
 
-    if (!isFirebaseConfigured || !firebaseAuth) {
+    if (!firebaseAuth) {
       setLoading(false);
       return;
     }
@@ -132,6 +137,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithEmail = useCallback(async (email: string, password: string): Promise<RexonUser> => {
     setAuthError(null);
 
+    if (isFirebaseConfigured) {
+      const { userProfile } = await signInWithVerifiedRole(email, password);
+      setUser(userProfile);
+      setIsPreviewSession(false);
+      return userProfile;
+    }
+
     const demoUser = verifyDemoCredentials(email, password);
     if (demoUser) {
       const { user: resolved, accountStatus } = resolvePreviewHRUserOverlay(demoUser);
@@ -145,21 +157,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return resolved;
     }
 
-    if (isFirebaseConfigured) {
-      const { userProfile } = await signInWithVerifiedRole(email, password);
-      setUser(userProfile);
-      setIsPreviewSession(false);
-      return userProfile;
-    }
-
     throw new Error(
       'Invalid email or password. Use the testing Demo ID & Password listed below, or configure Firebase (.env) for live accounts.'
     );
   }, []);
 
   const enterPreviewPortal = useCallback((role: UserRole) => {
+    if (isFirebaseConfigured) {
+      setAuthError('Development Preview mode is disabled when live Firebase Authentication is configured.');
+      return;
+    }
     const demoProfile = buildDemoProfileByRole(role);
-    const { user: resolved } = resolvePreviewHRUserOverlay(demoProfile);
+    const { user: resolved, accountStatus } = resolvePreviewHRUserOverlay(demoProfile);
+    if (accountStatus !== 'Active') {
+      setAuthError(`This HR account is marked ${accountStatus} by Administration.`);
+      return;
+    }
     savePreviewRoleSession(role);
     setUser(resolved);
     setIsPreviewSession(true);

@@ -21,8 +21,16 @@ import {
   getSitePortalDeploymentSummary,
   subscribeDeploymentData,
 } from '../../services/firestore/assignmentService';
+import {
+  getSitePortalAttendanceSummaries,
+  subscribeAttendanceData,
+} from '../../services/firestore/attendanceService';
 import { subscribeMasterData } from '../../services/firestore/masterDataService';
-import { SiteDeploymentSummaryRecord } from '../../types';
+import {
+  SanitizedSiteAttendanceSummaryRecord,
+  SiteDeploymentSummaryRecord,
+} from '../../types';
+import { getTodayIsoDate } from '../../utils/deploymentValidation';
 
 interface SiteDocumentItem {
   id: string;
@@ -132,33 +140,72 @@ export const SiteDashboard: React.FC<SiteDashboardProps> = ({ section = 'overvie
   }, [section]);
 
   const [liveSiteSummaries, setLiveSiteSummaries] = useState<SiteDeploymentSummaryRecord[]>([]);
+  const [liveAttendanceSummaries, setLiveAttendanceSummaries] = useState<
+    SanitizedSiteAttendanceSummaryRecord[]
+  >([]);
 
   useEffect(() => {
     if (!user) return;
     const load = () => {
       void getSitePortalDeploymentSummary(user, isPreviewSession).then(setLiveSiteSummaries);
+      void getSitePortalAttendanceSummaries(user, isPreviewSession, getTodayIsoDate())
+        .then(setLiveAttendanceSummaries)
+        .catch(() => setLiveAttendanceSummaries([]));
     };
     load();
     const u1 = subscribeDeploymentData(load);
     const u2 = subscribeMasterData(load);
+    const u3 = subscribeAttendanceData(load);
     return () => {
       u1();
       u2();
+      u3();
     };
   }, [user, isPreviewSession]);
 
   const useSample = isPreviewSession && showSampleLayoutData;
   const primarySiteId = user?.assignedSiteIds[0] ?? 'UNASSIGNED';
 
+  const liveShiftRows: ShiftAttendanceRow[] = useMemo(() => {
+    const rows: ShiftAttendanceRow[] = [];
+    for (const summary of liveAttendanceSummaries) {
+      for (const sh of summary.shiftBreakdown) {
+        rows.push({
+          shiftName: `${summary.siteName} — ${sh.shiftType}`,
+          timing: sh.timing,
+          sanctioned: sh.deployedCount,
+          present: sh.presentCount + sh.lateCount,
+          absent: sh.absentCount,
+        });
+      }
+    }
+    return rows;
+  }, [liveAttendanceSummaries]);
+
   const counts = useMemo(() => {
+    const attDeployed = liveAttendanceSummaries.reduce((s, r) => s + r.totalDeployed, 0);
+    const attPresent = liveAttendanceSummaries.reduce(
+      (s, r) => s + r.presentCount + r.lateCount + r.halfDayCount,
+      0
+    );
+    const attAbsent = liveAttendanceSummaries.reduce((s, r) => s + r.absentCount, 0);
+
     const liveDep = liveSiteSummaries.reduce((s, r) => s + r.totalDeployed, 0);
     const liveReq = liveSiteSummaries.reduce((s, r) => s + r.totalRequired, 0);
     const liveVac = liveSiteSummaries.reduce((s, r) => s + r.totalVacant, 0);
 
+    if (attDeployed > 0 || attPresent > 0 || attAbsent > 0) {
+      return {
+        totalDeployed: Math.max(liveDep, attDeployed),
+        presentCount: attPresent,
+        absentCount: attAbsent,
+      };
+    }
+
     if (liveReq > 0 || liveDep > 0) {
       return {
         totalDeployed: liveDep,
-        presentCount: liveDep,
+        presentCount: 0,
         absentCount: liveVac,
       };
     }
@@ -175,7 +222,7 @@ export const SiteDashboard: React.FC<SiteDashboardProps> = ({ section = 'overvie
       presentCount: 0,
       absentCount: 0,
     };
-  }, [useSample, liveSiteSummaries]);
+  }, [useSample, liveSiteSummaries, liveAttendanceSummaries]);
 
   const filteredDocs = useMemo(() => {
     const source = useSample ? SAMPLE_SITE_DOCUMENTS : [];
@@ -232,13 +279,22 @@ export const SiteDashboard: React.FC<SiteDashboardProps> = ({ section = 'overvie
           </p>
         </div>
 
-        <Link
-          to="/site/manpower"
-          className="inline-flex items-center gap-2 self-start sm:self-auto rounded-lg bg-[#5C3D2E] px-4 py-2 text-xs font-semibold text-white hover:bg-[#4A3023]"
-        >
-          <Users className="w-4 h-4" />
-          <span>View Manpower Deployment Summary</span>
-        </Link>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <Link
+            to="/site/attendance"
+            className="min-h-[42px] inline-flex items-center gap-2 rounded-lg bg-white border border-[#D4C7B8] px-4 py-2 text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
+          >
+            <CalendarCheck className="w-4 h-4 text-[#5C3D2E]" />
+            <span>Attendance Summary</span>
+          </Link>
+          <Link
+            to="/site/manpower"
+            className="min-h-[42px] inline-flex items-center gap-2 rounded-lg bg-[#5C3D2E] px-4 py-2 text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+          >
+            <Users className="w-4 h-4" />
+            <span>Manpower Deployment</span>
+          </Link>
+        </div>
       </div>
 
       {downloadNotice && (
@@ -311,21 +367,30 @@ export const SiteDashboard: React.FC<SiteDashboardProps> = ({ section = 'overvie
       {/* Authorized Shift-Wise Attendance Summary (Headcounts Only — Zero Private Employee PII) */}
       {(section === 'overview' || section === 'attendance') && (
         <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
-          <div className="mb-4">
-            <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-              Authorized Attendance Summary
-            </h2>
-            <p className="text-xs text-[#574B43]">
-              Shift-level turnout counts for <code className="font-mono-tabular">{primarySiteId}</code>{' '}
-              (headcount aggregates only; private personnel records remain isolated).
-            </p>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-semibold text-[#1F1916]">
+                Authorized Attendance Summary
+              </h2>
+              <p className="text-xs text-[#574B43]">
+                Shift-level turnout counts for{' '}
+                <code className="font-mono-tabular">{primarySiteId}</code> (headcount aggregates
+                only; private personnel records and GPS coordinates remain isolated).
+              </p>
+            </div>
+            <Link
+              to="/site/attendance"
+              className="text-xs font-semibold text-[#5C3D2E] hover:underline whitespace-nowrap"
+            >
+              Open Full Date-Wise Turnout →
+            </Link>
           </div>
 
-          {!useSample ? (
+          {liveShiftRows.length === 0 && !useSample ? (
             <EmptyStatePanel
               icon={CalendarCheck}
-              title="No Live Attendance Summary Published"
-              description="Once daily attendance verification is published for your assigned site in 'siteSummaries/{siteId}', shift-wise present and absent counts appear here."
+              title="No Live Attendance Summary Published Today"
+              description="Once daily duty rosters or attendance records are logged for your assigned site, sanitized shift-wise present and absent counts appear here."
               actionLabel={isPreviewSession ? 'Inspect Sample Attendance Layout' : undefined}
               onAction={isPreviewSession ? () => setShowSampleLayoutData(true) : undefined}
             />
@@ -336,14 +401,14 @@ export const SiteDashboard: React.FC<SiteDashboardProps> = ({ section = 'overvie
                   <tr className="border-y border-[#E5DDD2] bg-[#FAF8F5] text-xs font-semibold text-[#574B43]">
                     <th className="py-3 px-3">Shift Allocation</th>
                     <th className="py-3 px-3">Shift Hours</th>
-                    <th className="py-3 px-3 text-right">Sanctioned</th>
+                    <th className="py-3 px-3 text-right">Deployed</th>
                     <th className="py-3 px-3 text-right">Present</th>
                     <th className="py-3 px-3 text-right">Absent</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E5DDD2] text-sm">
-                  {SAMPLE_SHIFT_SUMMARY.map((shift) => (
-                    <tr key={shift.shiftName} className="hover:bg-[#FAF8F5]">
+                  {(liveShiftRows.length > 0 ? liveShiftRows : SAMPLE_SHIFT_SUMMARY).map((shift) => (
+                    <tr key={`${shift.shiftName}-${shift.timing}`} className="hover:bg-[#FAF8F5]">
                       <td className="py-3 px-3 font-medium text-[#1F1916]">{shift.shiftName}</td>
                       <td className="py-3 px-3 font-mono-tabular text-xs text-[#574B43] whitespace-nowrap">
                         {shift.timing}
