@@ -39,6 +39,9 @@ export function formatServiceErrorMessage(error: unknown): string {
     const parsed = JSON.parse(error.message) as Partial<FirestoreErrorInfo>;
     if (parsed && typeof parsed.error === 'string') {
       if (parsed.error.includes('Missing or insufficient permissions')) {
+        if (parsed.path?.startsWith('users/')) {
+          return 'Firestore Security Rules blocked access to your user profile. Please publish the project firestore.rules in Firebase Console → Firestore Database → Rules.';
+        }
         return 'Access denied by Firestore Security Rules. Verify your assigned role, branch, and site permissions.';
       }
       if (parsed.error.includes('Quota exceeded')) {
@@ -51,6 +54,9 @@ export function formatServiceErrorMessage(error: unknown): string {
   }
 
   const msg = error.message;
+  if (msg.includes('auth/configuration-not-found') || msg.includes('auth/operation-not-allowed')) {
+    return 'Email/Password sign-in is not enabled yet. In Firebase Console, open Build → Authentication → Sign-in method and enable Email/Password.';
+  }
   if (msg.includes('auth/invalid-credential') || msg.includes('auth/wrong-password') || msg.includes('auth/user-not-found')) {
     return 'Invalid email address or password. Verify your credentials and try again.';
   }

@@ -37,8 +37,13 @@ service cloud.firestore {
 
     function isBootstrappedAdmin() {
       return isSignedIn()
-        && request.auth.token.email == 'sandeeprana4519@gmail.com'
-        && request.auth.token.email_verified == true;
+        && (
+          request.auth.uid == 'Z8PuegekpDQiPzGIzleDYUVkjqI3'
+          || (
+            request.auth.token.email == 'sandeeprana4519@gmail.com'
+            && request.auth.token.email_verified == true
+          )
+        );
     }
 
     function hasActiveProfile() {

@@ -5,13 +5,16 @@ import {
   doc,
   getDoc,
   serverTimestamp,
+  setDoc,
   updateDoc,
 } from 'firebase/firestore';
 import { OperationType, RexonUser, UserRole } from '../../types';
 import { isValidUserRole, normalizePermissionList } from '../../utils/portalConfig';
 import { sanitizeInput } from '../../utils/validation';
-import { firestoreDb, isFirebaseConfigured } from '../firebase/config';
+import { firebaseAuth, firestoreDb, isFirebaseConfigured } from '../firebase/config';
 import { handleFirestoreError } from './errorHandler';
+
+const BOOTSTRAPPED_ADMIN_UID = 'Z8PuegekpDQiPzGIzleDYUVkjqI3';
 
 function formatTimestampField(val: unknown): string {
   if (val instanceof Timestamp) {
@@ -84,15 +87,44 @@ export async function fetchVerifiedUserProfile(uid: string): Promise<RexonUser |
   }
 
   const path = `users/${uid}`;
+  let existingData: Record<string, unknown> | null = null;
   try {
     const snap = await getDoc(doc(firestoreDb, 'users', uid));
-    if (!snap.exists()) {
-      return null;
+    if (snap.exists()) {
+      existingData = snap.data() as Record<string, unknown>;
     }
-    return parseFirestoreUserDocument(uid, snap.data() as Record<string, unknown>);
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
+
+  if (!existingData) {
+    if (uid === BOOTSTRAPPED_ADMIN_UID) {
+      const nowIso = new Date().toISOString();
+      const bootstrapDoc: Record<string, unknown> = {
+        uid: BOOTSTRAPPED_ADMIN_UID,
+        fullName: 'Admin',
+        email: sanitizeInput(firebaseAuth?.currentUser?.email || 'admin@rexon.com', 160),
+        phone: '+919876543210',
+        role: 'admin',
+        branchId: 'HQ',
+        assignedBranches: [],
+        assignedSiteIds: [],
+        permissions: [],
+        isActive: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      try {
+        await setDoc(doc(firestoreDb, 'users', uid), bootstrapDoc);
+      } catch (writeErr) {
+        handleFirestoreError(writeErr, OperationType.CREATE, path);
+      }
+      return parseFirestoreUserDocument(uid, bootstrapDoc);
+    }
+    return null;
+  }
+
+  return parseFirestoreUserDocument(uid, existingData);
 }
 
 /**
