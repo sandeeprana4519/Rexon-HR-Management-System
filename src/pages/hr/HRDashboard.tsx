@@ -23,6 +23,7 @@ import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
 import {
   listAttendanceCorrectionRequests,
+  listAttendanceExceptionReports,
   listAttendanceRecords,
   subscribeAttendanceData,
 } from '../../services/firestore/attendanceService';
@@ -38,13 +39,20 @@ import {
   ZERO_METRICS,
   fetchLivePortalMetrics,
 } from '../../services/firestore/portalMetricsService';
-import { ApprovalRequestRecord, EmployeeRecord, LivePortalMetrics } from '../../types';
+import {
+  ApprovalRequestRecord,
+  AttendanceExceptionReport,
+  AttendanceRecord,
+  EmployeeRecord,
+  LivePortalMetrics,
+} from '../../types';
+import { getTodayIstIsoDate } from '../../utils/attendanceValidation';
 import { getAuthorizedBranchIds, hasUserPermission } from '../../utils/portalConfig';
 import { validateRequiredText } from '../../utils/validation';
 
 interface HRQueueItem {
   id: string;
-  type: 'Leave' | 'Advance' | 'Admin Approval';
+  type: 'Leave' | 'Advance' | 'Admin Approval' | 'Field Report';
   subject: string;
   siteCode: string;
   submittedAt: string;
@@ -107,6 +115,8 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
   });
   const [employees, setEmployees] = useState<EmployeeRecord[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequestRecord[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [foExceptions, setFoExceptions] = useState<AttendanceExceptionReport[]>([]);
   const [pendingAttendanceCount, setPendingAttendanceCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
@@ -137,27 +147,34 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
     if (!user) return;
     setLoading(true);
     try {
-      const [clientList, siteList, empList, approvalList, attList, corrList] = await Promise.all([
-        listClients(user, isPreviewSession),
-        listSites(user, isPreviewSession),
-        canViewEmployees ? listEmployees(user, isPreviewSession) : Promise.resolve([]),
-        listApprovalRequests(user, isPreviewSession),
-        canViewAttendance
-          ? listAttendanceRecords(user, isPreviewSession).catch(() => [])
-          : Promise.resolve([]),
-        canViewAttendance
-          ? listAttendanceCorrectionRequests(user, isPreviewSession).catch(() => [])
-          : Promise.resolve([]),
-      ]);
+      const [clientList, siteList, empList, approvalList, attList, corrList, foList] =
+        await Promise.all([
+          listClients(user, isPreviewSession),
+          listSites(user, isPreviewSession),
+          canViewEmployees ? listEmployees(user, isPreviewSession) : Promise.resolve([]),
+          listApprovalRequests(user, isPreviewSession),
+          canViewAttendance
+            ? listAttendanceRecords(user, isPreviewSession).catch(() => [])
+            : Promise.resolve([]),
+          canViewAttendance
+            ? listAttendanceCorrectionRequests(user, isPreviewSession).catch(() => [])
+            : Promise.resolve([]),
+          canViewAttendance
+            ? listAttendanceExceptionReports(user, isPreviewSession).catch(() => [])
+            : Promise.resolve([]),
+        ]);
       setMasterCounts({
         clients: clientList.filter((c) => !c.isArchived).length,
         sites: siteList.filter((s) => !s.isArchived).length,
       });
       setEmployees(empList.filter((e) => !e.isDeleted));
       setApprovals(approvalList);
+      setAttendanceRecords(attList);
+      setFoExceptions(foList);
       const unverifiedAtt = attList.filter((a) => !a.isVerifiedByHr).length;
       const pendingCorr = corrList.filter((c) => c.status === 'Pending').length;
-      setPendingAttendanceCount(unverifiedAtt + pendingCorr);
+      const pendingFo = foList.filter((f) => f.status === 'Pending HR Review').length;
+      setPendingAttendanceCount(unverifiedAtt + pendingCorr + pendingFo);
 
       if (isFirebaseConfigured && !isPreviewSession) {
         const res = await fetchLivePortalMetrics(user);
@@ -194,6 +211,35 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
     () => approvals.filter((a) => a.status === 'Pending').length,
     [approvals]
   );
+
+  const attendancePulse = useMemo(() => {
+    const todayIst = getTodayIstIsoDate();
+    const todayRows = attendanceRecords.filter((r) => r.attendanceDate === todayIst);
+    const presentToday = todayRows.filter(
+      (r) =>
+        r.status === 'Present' ||
+        r.status === 'Late' ||
+        r.status === 'Half Day' ||
+        r.status === 'On Duty'
+    ).length;
+    const geofenceExceptions = attendanceRecords.filter(
+      (r) =>
+        !r.isVerifiedByHr &&
+        (r.status === 'Exception' ||
+          r.verificationOutcome === 'Outside_Geofence' ||
+          r.verificationOutcome === 'Low_GPS_Accuracy')
+    ).length;
+    const missingCheckOuts = attendanceRecords.filter(
+      (r) => Boolean(r.checkInAt) && !r.checkOutAt
+    ).length;
+    const pendingFoReports = foExceptions.filter((f) => f.status === 'Pending HR Review').length;
+    return {
+      presentToday,
+      geofenceExceptions,
+      missingCheckOuts,
+      pendingFoReports,
+    };
+  }, [attendanceRecords, foExceptions]);
 
   const kpis = useMemo(() => {
     const currentMonthPrefix = new Date().toISOString().slice(0, 7);
@@ -245,8 +291,22 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
             ? 'Verified'
             : 'Rejected',
     }));
-    return useSample ? [...liveApprovalItems, ...SAMPLE_HR_QUEUE] : liveApprovalItems;
-  }, [approvals, useSample]);
+    const liveFoItems: HRQueueItem[] = foExceptions.map((f) => ({
+      id: f.exceptionId,
+      type: 'Field Report',
+      subject: `${f.reportType} (${f.siteName}): ${f.summary}`,
+      siteCode: f.siteId,
+      submittedAt: f.attendanceDate,
+      status:
+        f.status === 'Pending HR Review'
+          ? 'Pending Review'
+          : f.status === 'Resolved'
+            ? 'Verified'
+            : 'Rejected',
+    }));
+    const mergedLive = [...liveFoItems, ...liveApprovalItems];
+    return useSample ? [...mergedLive, ...SAMPLE_HR_QUEUE] : mergedLive;
+  }, [approvals, foExceptions, useSample]);
 
   const filteredQueue = useMemo(() => {
     return combinedQueue.filter((item) => {
@@ -407,7 +467,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
             <StatMetricCard
               label="Attendance Pending"
               value={kpis.attendancePending}
-              subtext="Site sheets awaiting HR verification"
+              subtext="Punches, corrections & FO reports awaiting HR"
               icon={CalendarClock}
               tone={kpis.attendancePending > 0 ? 'attention' : 'default'}
             />
@@ -434,12 +494,63 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
         )}
       </section>
 
+      {/* Today's Live Attendance & Field Monitoring Strip */}
+      {canViewAttendance && (
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-[#E5DDD2]">
+            <div>
+              <h2 className="font-display text-base font-semibold text-[#1F1916]">
+                Today&apos;s Attendance &amp; Field Verification Pulse
+              </h2>
+              <p className="text-xs text-[#574B43]">
+                Unverified or outside-geofence punches remain excluded from payroll until verified
+                by HR.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/hr/attendance')}
+              className="min-h-[40px] px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap shrink-0 self-start sm:self-auto"
+            >
+              Open Verification Console
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+            <div>
+              <span className="text-[#7D6F65] block">Today&apos;s Present / On Duty</span>
+              <span className="mt-1 block font-mono-tabular text-xl font-bold text-[#166534]">
+                {attendancePulse.presentToday}
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7D6F65] block">Geofence / GPS Exceptions</span>
+              <span className="mt-1 block font-mono-tabular text-xl font-bold text-[#B91C1C]">
+                {attendancePulse.geofenceExceptions}
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7D6F65] block">Missing Check-Outs</span>
+              <span className="mt-1 block font-mono-tabular text-xl font-bold text-[#B45309]">
+                {attendancePulse.missingCheckOuts}
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7D6F65] block">Pending Field Officer Reports</span>
+              <span className="mt-1 block font-mono-tabular text-xl font-bold text-[#5C3D2E]">
+                {attendancePulse.pendingFoReports}
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Quick Actions */}
       <section className="bg-[#F3EDE4] border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
         <h2 className="font-display text-base font-semibold text-[#1F1916]">HR Quick Actions</h2>
         <p className="mt-0.5 text-xs text-[#574B43]">
-          Manage authorized Clients, Sites &amp; Service Configurations or submit sensitive HR
-          actions for Administrator approval.
+          Manage authorized Clients, Sites, Duty Rosters, Attendance Verification, or submit
+          sensitive HR actions for Administrator approval.
         </p>
 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -482,7 +593,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
               onClick={() => navigate('/hr/rosters')}
               className="min-h-[48px] flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-white border border-[#D4C7B8] text-left text-xs font-semibold text-[#1F1916] hover:border-[#5C3D2E] transition-colors whitespace-nowrap"
             >
-              <span className="truncate">Duty Roster Management</span>
+              <span className="truncate">Duty Roster &amp; Shifts</span>
               <CalendarClock className="w-4 h-4 text-[#5C3D2E] shrink-0" />
             </button>
           )}
@@ -547,18 +658,18 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
           <div>
             <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-              Branch HR Requests &amp; Verification Queue
+              Branch HR Requests, Field Reports &amp; Verification Queue
             </h2>
             <p className="text-xs text-[#574B43]">
               {useSample
-                ? 'Showing live Admin Approval submissions combined with [Sample] Leave/Advance rows.'
-                : 'Displays live Leave, Advance, and Admin Approval items for your authorized branch.'}
+                ? 'Showing live Field Reports and Admin Approval submissions combined with [Sample] Leave/Advance rows.'
+                : 'Displays live Field Officer Reports, Leave, Advance, and Admin Approval items for your authorized branch.'}
             </p>
           </div>
           <button
             type="button"
             onClick={() => navigate('/hr/approvals')}
-            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
+            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
           >
             Open Approvals Page
           </button>
@@ -570,6 +681,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
           searchPlaceholder="Search request ID, site, or subject..."
           filterOptions={[
             { value: 'ALL', label: 'All Items' },
+            { value: 'Field Report', label: 'Field Reports' },
             { value: 'Leave', label: 'Leave' },
             { value: 'Advance', label: 'Advance' },
             { value: 'Admin Approval', label: 'Admin Approval' },
@@ -585,7 +697,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
             description={
               useSample
                 ? 'Clear your search filter to see HR workflow items.'
-                : 'Employee leave requests, advance requests, and pending Admin approvals for your branch will populate here.'
+                : 'Field Officer exception reports, leave requests, advance requests, and pending Admin approvals for your branch will populate here.'
             }
             actionLabel={!useSample && isPreviewSession ? 'Inspect Sample HR Queue' : undefined}
             onAction={
@@ -674,7 +786,7 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
               <button
                 type="button"
                 onClick={() => setApprovalModalOpen(false)}
-                className="min-h-[36px] min-w-[36px] rounded-lg flex items-center justify-center text-[#7D6F65] hover:text-[#1F1916]"
+                className="min-h-[38px] min-w-[38px] rounded-lg flex items-center justify-center text-[#7D6F65] hover:text-[#1F1916]"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
@@ -718,14 +830,14 @@ export const HRDashboard: React.FC<HRDashboardProps> = ({ section = 'overview' }
                 <button
                   type="button"
                   onClick={() => setApprovalModalOpen(false)}
-                  className="min-h-[42px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916] whitespace-nowrap"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916] whitespace-nowrap"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submittingApproval}
-                  className="min-h-[42px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
                 >
                   Submit for Review
                 </button>

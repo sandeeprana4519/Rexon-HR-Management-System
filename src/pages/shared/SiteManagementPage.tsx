@@ -3,14 +3,17 @@ import { useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   Archive,
-  Briefcase,
   Building2,
+  Camera,
   CheckCircle2,
   Edit3,
   ExternalLink,
   Eye,
+  EyeOff,
+  KeyRound,
   Layers,
   LocateFixed,
+  Lock,
   MapPin,
   Plus,
   Send,
@@ -22,14 +25,21 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTableToolbar } from '../../components/DataTableToolbar';
 import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
+import { PortalCredentialSlipModal } from '../../components/PortalCredentialSlipModal';
 import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
+import {
+  MAX_PHOTO_UPLOAD_BYTES,
+  generateDefaultPortalPassword,
+  isSupportedImageFile,
+} from '../../services/firebase/config';
 import { formatServiceErrorMessage } from '../../services/firestore/errorHandler';
 import {
   archiveSiteRecord,
   computeSiteManpowerSummary,
   createSiteRecord,
   createSiteServiceConfig,
+  getIssuedCredentialsForSite,
   listBranches,
   listClients,
   listDesignations,
@@ -41,12 +51,14 @@ import {
   subscribeMasterData,
   updateSiteRecord,
   updateSiteServiceConfig,
+  uploadSitePhoto,
 } from '../../services/firestore/masterDataService';
 import {
   BranchRecord,
   ClientRecord,
   DesignationRecord,
   INDIAN_STATES,
+  IssuedPortalCredentials,
   SERVICE_CATEGORIES,
   SHIFT_TYPES,
   SITE_STATUSES,
@@ -119,6 +131,13 @@ export const SiteManagementPage: React.FC = () => {
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [gpsBusy, setGpsBusy] = useState(false);
+  const [uploadingSitePhoto, setUploadingSitePhoto] = useState(false);
+  const [siteInitialPassword, setSiteInitialPassword] = useState('');
+  const [showSitePassword, setShowSitePassword] = useState(false);
+
+  // Issued Site Portal Credentials Slip Modal
+  const [slipCredentials, setSlipCredentials] = useState<IssuedPortalCredentials | null>(null);
+  const [loadingCredsSiteId, setLoadingCredsSiteId] = useState<string | null>(null);
 
   // Complete Site Details + Manpower Summary Modal & Archive / Approval Modals
   const [viewingSite, setViewingSite] = useState<SiteRecord | null>(null);
@@ -187,6 +206,7 @@ export const SiteManagementPage: React.FC = () => {
 
       return {
         siteName: '',
+        sitePhoto: '',
         clientId: matchedClient?.clientId ?? '',
         clientName: matchedClient?.companyName ?? '',
         branchId:
@@ -215,6 +235,7 @@ export const SiteManagementPage: React.FC = () => {
 
   const [formData, setFormData] = useState<SiteFormInput>(() => ({
     siteName: '',
+    sitePhoto: '',
     clientId: '',
     clientName: '',
     branchId: '',
@@ -280,6 +301,8 @@ export const SiteManagementPage: React.FC = () => {
     if (qCreate === '1' && canCreateSite && selectableClients.length > 0) {
       setEditingSite(null);
       setFormData(buildEmptySiteForm(qClientId || undefined));
+      setSiteInitialPassword('');
+      setShowSitePassword(false);
       setFormError(null);
       setFormModalOpen(true);
 
@@ -423,14 +446,19 @@ export const SiteManagementPage: React.FC = () => {
     }
     setEditingSite(null);
     setFormData(buildEmptySiteForm(clientFilter !== 'ALL' ? clientFilter : undefined));
+    setSiteInitialPassword('');
+    setShowSitePassword(false);
     setFormError(null);
     setFormModalOpen(true);
   };
 
   const openEditModal = (site: SiteRecord) => {
     setEditingSite(site);
+    setSiteInitialPassword('');
+    setShowSitePassword(false);
     setFormData({
       siteName: site.siteName,
+      sitePhoto: site.sitePhoto || '',
       clientId: site.clientId,
       clientName: site.clientName,
       branchId: site.branchId,
@@ -451,6 +479,52 @@ export const SiteManagementPage: React.FC = () => {
     });
     setFormError(null);
     setFormModalOpen(true);
+  };
+
+  const handleSitePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0] ?? null;
+    if (!file) return;
+    setFormError(null);
+
+    if (!isSupportedImageFile(file)) {
+      inputEl.value = '';
+      setFormError('Site photograph must be a valid JPG, PNG, or WEBP image.');
+      return;
+    }
+    if (file.size > MAX_PHOTO_UPLOAD_BYTES) {
+      inputEl.value = '';
+      setFormError('Site photograph exceeds the 15 MB upload limit.');
+      return;
+    }
+
+    setUploadingSitePhoto(true);
+    try {
+      const url = await uploadSitePhoto(
+        editingSite?.siteId || 'NEW_SITE',
+        file,
+        isPreviewSession
+      );
+      setFormData((prev) => ({ ...prev, sitePhoto: url }));
+    } catch (err) {
+      setFormError(formatServiceErrorMessage(err));
+    } finally {
+      inputEl.value = '';
+      setUploadingSitePhoto(false);
+    }
+  };
+
+  const handleShowSiteCredentials = async (site: SiteRecord) => {
+    if (!user) return;
+    setLoadingCredsSiteId(site.siteId);
+    try {
+      const creds = await getIssuedCredentialsForSite(user, isPreviewSession, site);
+      setSlipCredentials(creds);
+    } catch (err) {
+      setFeedback({ type: 'error', text: formatServiceErrorMessage(err) });
+    } finally {
+      setLoadingCredsSiteId(null);
+    }
   };
 
   const openAddServiceConfigModal = (site: SiteRecord) => {
@@ -669,6 +743,11 @@ export const SiteManagementPage: React.FC = () => {
     if (!user) return;
     setFormError(null);
 
+    if (!editingSite && siteInitialPassword.trim().length > 0 && siteInitialPassword.trim().length < 6) {
+      setFormError('Site Portal Login Password must be at least 6 characters long.');
+      return;
+    }
+
     const validation = validateSiteForm(formData, sites, editingSite?.siteId);
     if (!validation.valid) {
       setFormError(validation.error ?? 'Please review the Site fields.');
@@ -684,11 +763,14 @@ export const SiteManagementPage: React.FC = () => {
           text: `Site ${editingSite.siteId} (${formData.siteName}) updated.`,
         });
       } else {
-        const created = await createSiteRecord(user, isPreviewSession, formData);
+        const created = await createSiteRecord(user, isPreviewSession, formData, {
+          initialPassword: siteInitialPassword.trim() || undefined,
+        });
         setFeedback({
           type: 'success',
-          text: `Site ${created.siteId} (${created.siteName}) created under Client ${created.clientName}.`,
+          text: `Site ${created.siteId} (${created.siteName}) created under Client ${created.clientName}. Site Portal Login ID & Password issued.`,
         });
+        setSlipCredentials(created.issuedCredentials ?? null);
       }
       setFormModalOpen(false);
       await loadData();
@@ -1014,21 +1096,37 @@ export const SiteManagementPage: React.FC = () => {
                         </td>
 
                         <td className="py-3.5 px-3">
-                          <div className="font-semibold text-[#1F1916]">{site.siteName}</div>
-                          <div className="text-xs text-[#574B43] mt-0.5 flex flex-wrap items-center gap-1.5">
-                            <span className="font-medium text-[#1F1916]">{site.clientName}</span>
-                            <span>·</span>
-                            <span>{site.siteType}</span>
-                            <span>·</span>
-                            <a
-                              href={mapsHref}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-0.5 text-[#5C3D2E] font-medium hover:underline"
-                            >
-                              <span>Map</span>
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
+                          <div className="flex items-start gap-2.5">
+                            {site.sitePhoto ? (
+                              <img
+                                src={site.sitePhoto}
+                                alt={site.siteName}
+                                referrerPolicy="no-referrer"
+                                className="w-9 h-9 rounded-lg object-cover border border-[#D4C7B8] shrink-0 mt-0.5"
+                              />
+                            ) : (
+                              <div className="w-9 h-9 rounded-lg bg-[#F3EDE4] text-[#5C3D2E] flex items-center justify-center shrink-0 mt-0.5">
+                                <MapPin className="w-4 h-4" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="font-semibold text-[#1F1916]">{site.siteName}</div>
+                              <div className="text-xs text-[#574B43] mt-0.5 flex flex-wrap items-center gap-1.5">
+                                <span className="font-medium text-[#1F1916]">{site.clientName}</span>
+                                <span>·</span>
+                                <span>{site.siteType}</span>
+                                <span>·</span>
+                                <a
+                                  href={mapsHref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-0.5 text-[#5C3D2E] font-medium hover:underline"
+                                >
+                                  <span>Map</span>
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              </div>
+                            </div>
                           </div>
                         </td>
 
@@ -1079,6 +1177,21 @@ export const SiteManagementPage: React.FC = () => {
 
                         <td className="py-3.5 px-3">
                           <div className="flex items-center justify-end gap-1.5">
+                            {(isAdmin || canCreateSite) && !site.isArchived && (
+                              <button
+                                type="button"
+                                disabled={loadingCredsSiteId === site.siteId}
+                                onClick={() => void handleShowSiteCredentials(site)}
+                                className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] transition-colors inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                                title="View Site Portal Login ID & Password"
+                              >
+                                <KeyRound className="w-3.5 h-3.5" />
+                                <span>
+                                  {loadingCredsSiteId === site.siteId ? 'Loading...' : 'ID & Password'}
+                                </span>
+                              </button>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => setViewingSite(site)}
@@ -1199,6 +1312,66 @@ export const SiteManagementPage: React.FC = () => {
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[#5C3D2E] border-b border-[#E5DDD2] pb-1.5">
                   1. Parent Client &amp; Site Identity
                 </h3>
+
+                {/* Site Photograph Upload */}
+                <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#E5DDD2] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    {formData.sitePhoto ? (
+                      <img
+                        src={formData.sitePhoto}
+                        alt={formData.siteName || 'Site'}
+                        referrerPolicy="no-referrer"
+                        className="w-14 h-14 rounded-xl object-cover border border-[#D4C7B8] shrink-0"
+                      />
+                    ) : (
+                      <div className="w-14 h-14 rounded-xl bg-[#F3EDE4] border border-[#D4C7B8] text-[#5C3D2E] flex items-center justify-center shrink-0">
+                        <Camera className="w-6 h-6" />
+                      </div>
+                    )}
+                    <div>
+                      <div className="text-xs font-semibold text-[#1F1916] flex items-center gap-2">
+                        <span>Site / Facility Gate Photograph (Optional)</span>
+                        {formData.sitePhoto && (
+                          <span className="text-[11px] font-semibold text-[#166534]">
+                            · Photo Ready
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-[#574B43]">
+                        JPG, PNG, or WEBP up to 15 MB · Instant auto-compression &amp; preview
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="min-h-[40px] px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap">
+                      <Camera className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                      <span>
+                        {uploadingSitePhoto
+                          ? 'Processing Photo...'
+                          : formData.sitePhoto
+                            ? 'Change Site Photo'
+                            : 'Upload Site Photo'}
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="hidden"
+                        disabled={uploadingSitePhoto}
+                        onChange={(e) => void handleSitePhotoUpload(e)}
+                      />
+                    </label>
+                    {formData.sitePhoto && (
+                      <button
+                        type="button"
+                        onClick={() => setFormData((p) => ({ ...p, sitePhoto: '' }))}
+                        className="min-h-[40px] px-3 py-2 rounded-lg text-xs font-medium text-[#B91C1C] hover:bg-[#FEF2F2] whitespace-nowrap"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   <div>
@@ -1475,7 +1648,7 @@ export const SiteManagementPage: React.FC = () => {
 
                   <div>
                     <label className="block text-xs font-semibold text-[#1F1916] mb-1">
-                      Manager Email <span className="text-[#B91C1C]">*</span>
+                      Manager Email (Optional · Auto-generates STE-YYYY-XXXX Login ID if blank)
                     </label>
                     <input
                       type="email"
@@ -1483,10 +1656,64 @@ export const SiteManagementPage: React.FC = () => {
                       onChange={(e) =>
                         setFormData((p) => ({ ...p, managerEmail: e.target.value }))
                       }
-                      placeholder="site.manager@client.com"
+                      placeholder="site.manager@client.com (or leave blank)"
                       className="w-full min-h-[42px] px-3.5 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg focus:outline-none focus:bg-white focus:border-[#5C3D2E]"
                     />
                   </div>
+
+                  {!editingSite && (
+                    <div className="sm:col-span-2 p-4 rounded-xl bg-[#FAF8F5] border border-[#D4C7B8] space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-[#1F1916] inline-flex items-center gap-1.5">
+                          <KeyRound className="w-4 h-4 text-[#5C3D2E]" />
+                          <span>Site Portal Login ID &amp; Password (Issued Automatically on Save)</span>
+                        </div>
+                        <span className="text-[11px] font-medium text-[#5C3D2E]">
+                          Isolated strictly to this Site
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-[#574B43] mb-1">
+                            Site Portal Login ID
+                          </label>
+                          <div className="min-h-[40px] px-3 py-2 rounded-lg bg-white border border-[#E5DDD2] text-xs font-mono-tabular font-semibold text-[#1F1916] flex items-center">
+                            {formData.managerEmail.trim().toLowerCase() ||
+                              'Auto Site ID (STE-YYYY-XXXX)'}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-semibold text-[#574B43] mb-1">
+                            Initial Site Portal Password (Optional Custom)
+                          </label>
+                          <div className="relative">
+                            <Lock className="w-3.5 h-3.5 text-[#7D6F65] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            <input
+                              type={showSitePassword ? 'text' : 'password'}
+                              value={siteInitialPassword}
+                              onChange={(e) => setSiteInitialPassword(e.target.value)}
+                              placeholder={`Auto: ${generateDefaultPortalPassword(formData.managerMobile)}`}
+                              className="w-full min-h-[40px] pl-8 pr-9 py-1.5 text-xs font-mono-tabular bg-white border border-[#E5DDD2] rounded-lg focus:outline-none focus:border-[#5C3D2E]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowSitePassword((v) => !v)}
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#7D6F65] hover:text-[#1F1916]"
+                              aria-label={showSitePassword ? 'Hide password' : 'Show password'}
+                            >
+                              {showSitePassword ? (
+                                <EyeOff className="w-4 h-4" />
+                              ) : (
+                                <Eye className="w-4 h-4" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1576,26 +1803,40 @@ export const SiteManagementPage: React.FC = () => {
         >
           <div className="w-full max-w-5xl bg-white border border-[#E5DDD2] rounded-xl shadow-xl my-auto max-h-[92vh] flex flex-col">
             <div className="flex items-start justify-between gap-4 px-5 sm:px-6 py-4 border-b border-[#E5DDD2] shrink-0">
-              <div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-[#7D6F65]">
-                  <span className="font-mono-tabular font-semibold text-[#5C3D2E]">
-                    {viewingSite.siteId}
-                  </span>
-                  <span>·</span>
-                  <span>{viewingSite.siteType}</span>
-                  <span>·</span>
-                  <span className={statusTextClass(viewingSite)}>
-                    {viewingSite.isArchived
-                      ? 'Archived (Historical Record)'
-                      : viewingSite.siteStatus}
-                  </span>
+              <div className="flex items-center gap-3.5">
+                {viewingSite.sitePhoto ? (
+                  <img
+                    src={viewingSite.sitePhoto}
+                    alt={viewingSite.siteName}
+                    referrerPolicy="no-referrer"
+                    className="w-12 h-12 rounded-xl object-cover border border-[#D4C7B8] shrink-0"
+                  />
+                ) : (
+                  <div className="w-12 h-12 rounded-xl bg-[#F3EDE4] text-[#5C3D2E] flex items-center justify-center shrink-0">
+                    <MapPin className="w-5 h-5" />
+                  </div>
+                )}
+                <div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#7D6F65]">
+                    <span className="font-mono-tabular font-semibold text-[#5C3D2E]">
+                      {viewingSite.siteId}
+                    </span>
+                    <span>·</span>
+                    <span>{viewingSite.siteType}</span>
+                    <span>·</span>
+                    <span className={statusTextClass(viewingSite)}>
+                      {viewingSite.isArchived
+                        ? 'Archived (Historical Record)'
+                        : viewingSite.siteStatus}
+                    </span>
+                  </div>
+                  <h2
+                    id="site-detail-modal-title"
+                    className="mt-1 font-display text-lg sm:text-xl font-bold text-[#1F1916]"
+                  >
+                    {viewingSite.siteName}
+                  </h2>
                 </div>
-                <h2
-                  id="site-detail-modal-title"
-                  className="mt-1 font-display text-lg sm:text-xl font-bold text-[#1F1916]"
-                >
-                  {viewingSite.siteName}
-                </h2>
               </div>
 
               <button
@@ -1975,6 +2216,22 @@ export const SiteManagementPage: React.FC = () => {
             </div>
 
             <div className="px-5 sm:px-6 py-3.5 border-t border-[#E5DDD2] flex flex-wrap justify-end items-center gap-2 shrink-0">
+              {(isAdmin || canCreateSite) && !viewingSite.isArchived && (
+                <button
+                  type="button"
+                  disabled={loadingCredsSiteId === viewingSite.siteId}
+                  onClick={() => void handleShowSiteCredentials(viewingSite)}
+                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-60"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>
+                    {loadingCredsSiteId === viewingSite.siteId
+                      ? 'Loading Credentials...'
+                      : 'Site Portal ID & Password'}
+                  </span>
+                </button>
+              )}
+
               {canDeleteSite && !viewingSite.isArchived && (
                 <button
                   type="button"
@@ -2439,6 +2696,12 @@ export const SiteManagementPage: React.FC = () => {
         loading={removingConfig}
         onConfirm={() => void handleConfirmRemoveConfig()}
         onCancel={() => setRemoveConfigTarget(null)}
+      />
+
+      {/* Issued Site Portal Login ID & Password Slip Modal */}
+      <PortalCredentialSlipModal
+        credentials={slipCredentials}
+        onClose={() => setSlipCredentials(null)}
       />
     </div>
   );

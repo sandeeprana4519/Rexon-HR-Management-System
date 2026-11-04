@@ -22,11 +22,19 @@ import {
   DEMO_SHARED_PASSWORD,
 } from '../../utils/demoCredentials';
 import { PORTAL_LIST, getPortalByRole } from '../../utils/portalConfig';
-import { validateEmail, validateLoginPassword } from '../../utils/validation';
+import { validateLoginIdentifier, validateLoginPassword } from '../../utils/validation';
 
 interface PortalLoginPageProps {
   portalRole: UserRole;
 }
+
+const ROLE_ID_PLACEHOLDER: Record<UserRole, string> = {
+  admin: 'admin@rexon.com',
+  hr: 'hr@rexon.com or HR-2026-0001',
+  field_officer: 'FO-2026-0001 or officer@email.com',
+  site: 'STE-2026-0001 or manager@email.com',
+  employee: 'EMP-2026-0001 or employee@email.com',
+};
 
 export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) => {
   const portal = getPortalByRole(portalRole);
@@ -61,9 +69,9 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
     e.preventDefault();
     setFormError(null);
 
-    const emailCheck = validateEmail(email);
-    if (!emailCheck.valid) {
-      setFormError(emailCheck.error ?? 'Invalid email.');
+    const idCheck = validateLoginIdentifier(email);
+    if (!idCheck.valid) {
+      setFormError(idCheck.error ?? 'Invalid Login ID or Email.');
       return;
     }
 
@@ -168,7 +176,7 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
               Sign in to {portal.shortTitle}
             </h1>
             <p className="mt-1 text-xs sm:text-sm text-[#574B43]">
-              Enter your registered email ID and password to continue.
+              Enter your issued Portal ID or registered Email ID and password to continue.
             </p>
           </div>
 
@@ -188,7 +196,7 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
                 htmlFor="portal-email"
                 className="block text-xs font-semibold text-[#1F1916] mb-1.5"
               >
-                Email Address
+                Portal Login ID or Email Address
               </label>
               <div className="relative">
                 <Mail
@@ -197,11 +205,15 @@ export const PortalLoginPage: React.FC<PortalLoginPageProps> = ({ portalRole }) 
                 />
                 <input
                   id="portal-email"
-                  type="email"
-                  autoComplete="email"
+                  type="text"
+                  autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder={isFirebaseConfigured ? 'name@rexonsecurity.com' : currentDemo.email}
+                  placeholder={
+                    isFirebaseConfigured
+                      ? ROLE_ID_PLACEHOLDER[portalRole]
+                      : `${currentDemo.email} or System ID`
+                  }
                   className="w-full min-h-[46px] pl-10 pr-4 py-2.5 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg text-[#1F1916] placeholder:text-[#7D6F65] focus:outline-none focus:bg-white focus:border-[#5C3D2E] transition-colors"
                   required
                 />

@@ -21,17 +21,25 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DataTableToolbar } from '../../components/DataTableToolbar';
 import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
+import { PortalCredentialSlipModal } from '../../components/PortalCredentialSlipModal';
 import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
+import {
+  MAX_PHOTO_UPLOAD_BYTES,
+  generateDefaultPortalPassword,
+  isSupportedImageFile,
+} from '../../services/firebase/config';
 import { formatServiceErrorMessage } from '../../services/firestore/errorHandler';
 import {
   createBranchRecord,
   createHRProfileAccount,
+  getIssuedCredentialsForHR,
   listBranches,
   listHRProfiles,
   subscribeMasterData,
   updateHRAccountStatus,
   updateHRProfileAccount,
+  uploadHRProfilePhoto,
 } from '../../services/firestore/masterDataService';
 import {
   BranchRecord,
@@ -40,6 +48,7 @@ import {
   HRProfileFormInput,
   HRProfileRecord,
   HR_DESIGNATIONS,
+  IssuedPortalCredentials,
   PERMISSION_PROFILES,
   PERMISSION_PROFILE_MAP,
   PermissionProfileName,
@@ -92,9 +101,14 @@ export const HRManagementPage: React.FC = () => {
   const [existingAuthUid, setExistingAuthUid] = useState<string>('');
   const [selectedPhotoFile, setSelectedPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string>('');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [creatingQuickBranch, setCreatingQuickBranch] = useState(false);
+
+  // Issued Portal Credentials Slip Modal
+  const [slipCredentials, setSlipCredentials] = useState<IssuedPortalCredentials | null>(null);
+  const [loadingCredsHrId, setLoadingCredsHrId] = useState<string | null>(null);
 
   // Detail View & Status Confirmation
   const [viewingHR, setViewingHR] = useState<HRProfileRecord | null>(null);
@@ -270,20 +284,50 @@ export const HRManagementPage: React.FC = () => {
     }
   };
 
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
     if (!file) return;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setFormError('Profile photo must be JPG, PNG, or WebP format.');
+    if (!isSupportedImageFile(file)) {
+      inputEl.value = '';
+      setFormError('Profile photo must be a JPG, PNG, or WebP image.');
       return;
     }
-    if (file.size > 2 * 1024 * 1024) {
-      setFormError('Profile photo file size must not exceed 2 MB.');
+    if (file.size > MAX_PHOTO_UPLOAD_BYTES) {
+      inputEl.value = '';
+      setFormError('Profile photo file size must not exceed 15 MB.');
       return;
     }
     setFormError(null);
-    setSelectedPhotoFile(file);
-    setPhotoPreviewUrl(URL.createObjectURL(file));
+    setUploadingPhoto(true);
+    try {
+      const processedUrl = await uploadHRProfilePhoto(
+        editingHR?.hrId || 'NEW_HR',
+        file,
+        isPreviewSession
+      );
+      setSelectedPhotoFile(null);
+      setPhotoPreviewUrl(processedUrl);
+      setFormData((prev) => ({ ...prev, profilePhoto: processedUrl }));
+    } catch (err) {
+      setFormError(formatServiceErrorMessage(err));
+    } finally {
+      inputEl.value = '';
+      setUploadingPhoto(false);
+    }
+  };
+
+  const handleOpenCredentials = async (hr: HRProfileRecord) => {
+    if (!user) return;
+    setLoadingCredsHrId(hr.hrId);
+    try {
+      const creds = await getIssuedCredentialsForHR(user, isPreviewSession, hr);
+      setSlipCredentials(creds);
+    } catch (err) {
+      setBanner({ type: 'error', text: formatServiceErrorMessage(err) });
+    } finally {
+      setLoadingCredsHrId(null);
+    }
   };
 
   const toggleBranchSelection = (branchId: string) => {
@@ -322,17 +366,13 @@ export const HRManagementPage: React.FC = () => {
           text: `HR account ${editingHR.hrId} (${formData.fullName}) updated.`,
         });
       } else {
-        if (
-          isLiveFirebase &&
-          initialPassword.trim().length > 0 &&
-          initialPassword.trim().length < 6
-        ) {
+        if (initialPassword.trim().length > 0 && initialPassword.trim().length < 6) {
           setFormError('Initial Login Password must be at least 6 characters long.');
           setSaving(false);
           return;
         }
 
-        const { record, provisioningNote } = await createHRProfileAccount(
+        const { record, provisioningNote, issuedCredentials } = await createHRProfileAccount(
           user,
           isPreviewSession,
           formData,
@@ -342,6 +382,7 @@ export const HRManagementPage: React.FC = () => {
             existingAuthUid: existingAuthUid.trim(),
           }
         );
+        setSlipCredentials(issuedCredentials);
         setBanner({
           type: 'success',
           text: `Created ${record.hrId} (${record.fullName} · ${record.hrDesignation}). ${provisioningNote}`,
@@ -629,6 +670,18 @@ export const HRManagementPage: React.FC = () => {
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
+                            disabled={loadingCredsHrId === hr.hrId}
+                            onClick={() => void handleOpenCredentials(hr)}
+                            className="min-h-[36px] px-2.5 py-1.5 rounded-md bg-[#F3EDE4] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#E7DDD0] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                            title="View HR Portal Login ID & Password"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            <span>
+                              {loadingCredsHrId === hr.hrId ? 'Loading...' : 'ID & Password'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setViewingHR(hr)}
                             className="min-h-[36px] px-2.5 py-1.5 rounded-md bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-medium text-[#1F1916] hover:bg-[#F3EDE4]"
                             title="View HR profile"
@@ -727,23 +780,51 @@ export const HRManagementPage: React.FC = () => {
                   <div>
                     <p className="text-xs font-semibold text-[#1F1916]">
                       Profile Photo &amp; Automatic HR ID
+                      {photoPreviewUrl ? (
+                        <span className="text-[#166534] ml-1.5">· Ready</span>
+                      ) : null}
                     </p>
                     <p className="font-mono-tabular text-xs text-[#5C3D2E]">
                       {editingHR ? editingHR.hrId : 'Auto-Generated (HR-YYYY-XXXX)'}
                     </p>
+                    <p className="text-[11px] text-[#7D6F65]">
+                      JPG, PNG, or WebP up to 15 MB · Instant auto-compression
+                    </p>
                   </div>
                 </div>
 
-                <label className="min-h-[40px] inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] cursor-pointer whitespace-nowrap">
-                  <Camera className="w-4 h-4" />
-                  <span>Upload Photo</span>
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    onChange={handlePhotoChange}
-                    className="sr-only"
-                  />
-                </label>
+                <div className="flex items-center gap-2">
+                  <label className="min-h-[40px] inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] cursor-pointer whitespace-nowrap">
+                    <Camera className="w-4 h-4" />
+                    <span>
+                      {uploadingPhoto
+                        ? 'Processing...'
+                        : photoPreviewUrl
+                          ? 'Change Photo'
+                          : 'Upload Photo'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      disabled={uploadingPhoto}
+                      onChange={(e) => void handlePhotoChange(e)}
+                      className="sr-only"
+                    />
+                  </label>
+                  {photoPreviewUrl && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPhotoFile(null);
+                        setPhotoPreviewUrl('');
+                        setFormData((prev) => ({ ...prev, profilePhoto: '' }));
+                      }}
+                      className="min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-semibold text-[#B91C1C] hover:bg-[#FEF2F2]"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -763,16 +844,15 @@ export const HRManagementPage: React.FC = () => {
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-[#1F1916] mb-1">
-                    Official Email (Firebase Auth Login) *
+                    Official Email (Optional · Auto-generates HR ID Login if blank)
                   </label>
                   <input
                     type="email"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    placeholder="hr.officer@rexonsecurity.com"
+                    placeholder="hr.officer@rexonsecurity.com (or leave blank)"
                     maxLength={160}
                     className="w-full min-h-[42px] px-3.5 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg focus:outline-none focus:bg-white focus:border-[#5C3D2E]"
-                    required
                   />
                 </div>
               </div>
@@ -881,24 +961,41 @@ export const HRManagementPage: React.FC = () => {
                 </span>
               </div>
 
-              {/* Live Firebase Auth Login Setup (Only when creating a new HR account) */}
-              {!editingHR && isLiveFirebase && (
+              {/* HR Portal Login ID & Password Setup (Shown when creating a new HR account) */}
+              {!editingHR && (
                 <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#D4C7B8] space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-semibold text-[#1F1916]">
                       <KeyRound className="w-3.5 h-3.5 text-[#5C3D2E]" />
-                      <span>HR Portal Login Password (Firebase Authentication)</span>
+                      <span>HR Portal Login ID &amp; Password (Issued on Creation)</span>
                     </div>
                     <button
                       type="button"
                       onClick={() => {
-                        setInitialPassword('Rexon@123');
+                        setInitialPassword(generateDefaultPortalPassword(formData.mobile));
                         setShowInitialPassword(true);
                       }}
-                      className="min-h-[30px] px-2.5 py-1 rounded-md bg-white border border-[#D4C7B8] text-[11px] font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4]"
+                      className="min-h-[30px] px-2.5 py-1 rounded-md bg-white border border-[#D4C7B8] text-[11px] font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap"
                     >
-                      Use Default (Rexon@123)
+                      Use Auto Password ({generateDefaultPortalPassword(formData.mobile)})
                     </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs bg-white border border-[#E5DDD2] rounded-lg p-3">
+                    <div>
+                      <span className="text-[#7D6F65] block">Portal Login ID</span>
+                      <span className="font-mono-tabular font-semibold text-[#1F1916] break-all">
+                        {formData.email.trim() || 'Auto HR ID (HR-YYYY-XXXX)'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#7D6F65] block">Password Issued on Save</span>
+                      <span className="font-mono-tabular font-semibold text-[#5C3D2E]">
+                        {initialPassword.trim().length >= 6
+                          ? initialPassword.trim()
+                          : generateDefaultPortalPassword(formData.mobile)}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="relative">
@@ -907,9 +1004,9 @@ export const HRManagementPage: React.FC = () => {
                       type={showInitialPassword ? 'text' : 'password'}
                       value={initialPassword}
                       onChange={(e) => setInitialPassword(e.target.value)}
-                      placeholder="Set initial password (min 6 chars) or leave blank for reset email"
+                      placeholder={`Custom password (min 6 chars) or leave blank for ${generateDefaultPortalPassword(formData.mobile)}`}
                       autoComplete="new-password"
-                      className="w-full min-h-[42px] pl-10 pr-11 py-2 text-sm bg-white border border-[#E5DDD2] rounded-lg focus:outline-none focus:border-[#5C3D2E]"
+                      className="w-full min-h-[42px] pl-10 pr-11 py-2 text-sm font-mono-tabular bg-white border border-[#E5DDD2] rounded-lg focus:outline-none focus:border-[#5C3D2E]"
                     />
                     <button
                       type="button"
@@ -925,22 +1022,24 @@ export const HRManagementPage: React.FC = () => {
                     </button>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#574B43]">
-                    <span>
-                      Sent directly to Firebase Auth only — never saved in Firestore.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowExistingUidField((prev) => !prev)}
-                      className="font-semibold text-[#5C3D2E] hover:underline"
-                    >
-                      {showExistingUidField
-                        ? 'Hide Existing Auth UID'
-                        : 'Already added in Firebase Console? Link UID'}
-                    </button>
-                  </div>
+                  {isLiveFirebase && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#574B43]">
+                      <span>
+                        A copyable Login ID &amp; Password slip opens immediately after creation.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowExistingUidField((prev) => !prev)}
+                        className="font-semibold text-[#5C3D2E] hover:underline"
+                      >
+                        {showExistingUidField
+                          ? 'Hide Existing Auth UID'
+                          : 'Already added in Firebase Console? Link UID'}
+                      </button>
+                    </div>
+                  )}
 
-                  {showExistingUidField && (
+                  {isLiveFirebase && showExistingUidField && (
                     <div>
                       <label className="block text-[11px] font-semibold text-[#1F1916] mb-1">
                         Existing Firebase Auth User UID (Optional)
@@ -1120,7 +1219,19 @@ export const HRManagementPage: React.FC = () => {
               </div>
             </dl>
 
-            <div className="mt-6 flex justify-end gap-2">
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const target = viewingHR;
+                  setViewingHR(null);
+                  void handleOpenCredentials(target);
+                }}
+                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>View Login ID &amp; Password</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -1128,14 +1239,14 @@ export const HRManagementPage: React.FC = () => {
                   setViewingHR(null);
                   openEditModal(target);
                 }}
-                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#F3EDE4] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E]"
+                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#F3EDE4] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] whitespace-nowrap"
               >
                 Edit HR Account
               </button>
               <button
                 type="button"
                 onClick={() => setViewingHR(null)}
-                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white"
+                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white whitespace-nowrap"
               >
                 Close
               </button>
@@ -1143,6 +1254,11 @@ export const HRManagementPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      <PortalCredentialSlipModal
+        credentials={slipCredentials}
+        onClose={() => setSlipCredentials(null)}
+      />
 
       <ConfirmDialog
         open={Boolean(statusTarget)}

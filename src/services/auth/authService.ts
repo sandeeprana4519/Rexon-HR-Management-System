@@ -7,7 +7,11 @@ import {
   updatePassword,
 } from 'firebase/auth';
 import { RexonUser } from '../../types';
-import { firebaseAuth, isFirebaseConfigured } from '../firebase/config';
+import {
+  firebaseAuth,
+  isFirebaseConfigured,
+  normalizePortalLoginIdentifier,
+} from '../firebase/config';
 import { fetchVerifiedUserProfile, recordAuditEvent } from '../firestore/userRoleService';
 
 export interface PortalSignInResult {
@@ -15,11 +19,11 @@ export interface PortalSignInResult {
 }
 
 /**
- * Authenticates a user with Firebase Auth and immediately verifies their
+ * Authenticates a user with Firebase Auth (supporting Email OR System ID) and immediately verifies their
  * `users/{uid}` role and `isActive` flag in Cloud Firestore.
  */
 export async function signInWithVerifiedRole(
-  email: string,
+  emailOrSystemId: string,
   password: string
 ): Promise<PortalSignInResult> {
   if (!isFirebaseConfigured || !firebaseAuth) {
@@ -28,7 +32,8 @@ export async function signInWithVerifiedRole(
     );
   }
 
-  const credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+  const normalizedEmail = normalizePortalLoginIdentifier(emailOrSystemId);
+  const credential = await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password);
   const uid = credential.user.uid;
 
   const verifiedProfile = await fetchVerifiedUserProfile(uid);
@@ -73,7 +78,7 @@ export async function requestPasswordReset(email: string): Promise<void> {
     );
   }
 
-  await sendPasswordResetEmail(firebaseAuth, email.trim());
+  await sendPasswordResetEmail(firebaseAuth, normalizePortalLoginIdentifier(email));
 }
 
 /**

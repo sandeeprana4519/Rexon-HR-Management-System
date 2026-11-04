@@ -615,9 +615,10 @@ service cloud.firestore {
           'clientId', 'clientName', 'siteId', 'siteName', 'siteServiceId',
           'serviceCategory', 'serviceId', 'serviceName', 'designationId', 'designationName',
           'employeeId', 'employeeName', 'linkedUid', 'assignmentId',
-          'dutyDate', 'dutyEndDate', 'shiftType', 'dutyStartTime', 'dutyEndTime',
+          'dutyDate', 'dutyEndDate', 'shiftId', 'shiftType', 'dutyStartTime', 'dutyEndTime',
           'crossesMidnight', 'breakDurationMinutes', 'grossDurationMinutes', 'netScheduledMinutes',
-          'reportingTime', 'gracePeriodMinutes', 'assignedFieldOfficerUid', 'assignedFieldOfficerName',
+          'reportingTime', 'gracePeriodMinutes', 'weeklyOffDay',
+          'assignedFieldOfficerUid', 'assignedFieldOfficerName',
           'dutyInstructions', 'status', 'authorizedCapacityException', 'capacityExceptionReason',
           'publishedAt', 'publishedBy', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
           'serverCreatedAt', 'serverUpdatedAt'
@@ -647,7 +648,11 @@ service cloud.firestore {
         && data.assignmentId is string && data.assignmentId.size() >= 1 && data.assignmentId.size() <= 64
         && data.dutyDate is string && data.dutyDate.size() == 10
         && data.dutyEndDate is string && data.dutyEndDate.size() == 10
-        && data.shiftType in ['Day Shift', 'Night Shift', 'General Shift', 'Rotational Shift', 'Custom Shift']
+        && (!('shiftId' in data) || (data.shiftId is string && data.shiftId.size() <= 64))
+        && data.shiftType in [
+          'General Shift', 'Morning Shift', 'Evening Shift',
+          'Day Shift', 'Night Shift', 'Rotational Shift', 'Custom Shift'
+        ]
         && data.dutyStartTime is string && data.dutyStartTime.size() == 5
         && data.dutyEndTime is string && data.dutyEndTime.size() == 5
         && data.crossesMidnight is bool
@@ -656,6 +661,7 @@ service cloud.firestore {
         && data.netScheduledMinutes is int && data.netScheduledMinutes > 0 && data.netScheduledMinutes <= 960
         && data.reportingTime is string && data.reportingTime.size() == 5
         && data.gracePeriodMinutes is int && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 120
+        && (!('weeklyOffDay' in data) || (data.weeklyOffDay is string && data.weeklyOffDay.size() <= 32))
         && data.assignedFieldOfficerUid is string && data.assignedFieldOfficerUid.size() <= 128
         && data.assignedFieldOfficerName is string && data.assignedFieldOfficerName.size() <= 120
         && data.dutyInstructions is string && data.dutyInstructions.size() <= 400
@@ -694,13 +700,16 @@ service cloud.firestore {
           'assignmentId', 'rosterId', 'attendanceDate', 'date', 'shiftType',
           'scheduledStartTime', 'scheduledEndTime', 'crossesMidnight',
           'breakDurationMinutes', 'gracePeriodMinutes', 'status',
+          'verificationStatus', 'locationStatus', 'isPayrollEligible',
           'checkInAt', 'checkOutAt', 'checkInMethod', 'checkOutMethod',
-          'checkInGeo', 'checkOutGeo', 'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
+          'checkInGeo', 'checkOutGeo', 'checkInPhoto', 'checkOutPhoto',
+          'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
           'totalGrossMinutes', 'totalDutyMinutes', 'totalDutyHours',
           'lateArrivalMinutes', 'earlyDepartureMinutes', 'overtimeMinutes',
           'overtimeStatus', 'approvedOvertimeMinutes', 'overtimeApprovedBy', 'overtimeApprovedAt',
           'verificationOutcome', 'isVerifiedByHr', 'verifiedByUid', 'verifiedByName', 'verifiedAt',
           'exceptionReason', 'hrRemarks', 'fieldOfficerRemarks',
+          'timeCorrectionHistory', 'idempotencyKey', 'offlineClientPunchId',
           'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
           'serverCreatedAt', 'serverUpdatedAt'
         ])
@@ -724,8 +733,37 @@ service cloud.firestore {
         && data.scheduledEndTime is string && data.scheduledEndTime.size() == 5
         && data.crossesMidnight is bool
         && data.status in [
-          'Present', 'Absent', 'Late', 'Half Day', 'Weekly Off', 'Holiday', 'Leave', 'Pending', 'Exception'
+          'Present', 'On Duty', 'Absent', 'Late', 'Half Day', 'Incomplete',
+          'Weekly Off', 'Holiday', 'Leave', 'Pending', 'Exception', 'Rejected'
         ]
+        && (
+          !('verificationStatus' in data)
+          || data.verificationStatus in ['Pending', 'Verified', 'Rejected', 'Exception Approved']
+        )
+        && (
+          !('locationStatus' in data)
+          || data.locationStatus in [
+            'Within Geofence', 'Outside Geofence', 'GPS Accuracy Low',
+            'GPS Permission Denied', 'Location Unavailable'
+          ]
+        )
+        && (!('isPayrollEligible' in data) || data.isPayrollEligible is bool)
+        && (!('checkInPhoto' in data) || data.checkInPhoto == null || data.checkInPhoto is map)
+        && (!('checkOutPhoto' in data) || data.checkOutPhoto == null || data.checkOutPhoto is map)
+        && (
+          !('timeCorrectionHistory' in data)
+          || (data.timeCorrectionHistory is list && data.timeCorrectionHistory.size() <= 50)
+        )
+        && (
+          !('idempotencyKey' in data)
+          || data.idempotencyKey == null
+          || (data.idempotencyKey is string && data.idempotencyKey.size() <= 160)
+        )
+        && (
+          !('offlineClientPunchId' in data)
+          || data.offlineClientPunchId == null
+          || (data.offlineClientPunchId is string && data.offlineClientPunchId.size() <= 128)
+        )
         && (data.checkInAt == null || (data.checkInAt is string && data.checkInAt.size() <= 40))
         && (data.checkOutAt == null || (data.checkOutAt is string && data.checkOutAt.size() <= 40))
         && (data.checkInMethod == null || data.checkInMethod in ['GPS', 'QR', 'Manual_HR'])
@@ -858,7 +896,10 @@ service cloud.firestore {
           'actorUid', 'actorName', 'actorRole', 'timestamp', 'createdAt'
         ])
         && data.auditId == auditId
-        && data.category in ['Roster', 'Attendance', 'Geofence', 'QR', 'Correction', 'Overtime']
+        && data.category in [
+          'Roster', 'Attendance', 'Geofence', 'QR',
+          'Correction', 'Overtime', 'Shift', 'FieldReport'
+        ]
         && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 64
         && data.employeeId is string && data.employeeId.size() <= 64
         && data.siteId is string && data.siteId.size() <= 64
@@ -871,6 +912,130 @@ service cloud.firestore {
         && data.actorName is string && data.actorName.size() <= 120
         && isValidRoleValue(data.actorRole)
         && data.timestamp is string && data.timestamp.size() <= 40;
+    }
+
+    function isValidShiftMasterPayload(data, shiftId) {
+      return data.keys().hasAll([
+          'shiftId', 'shiftName', 'shiftCode', 'shiftType',
+          'startTime', 'endTime', 'reportingTime',
+          'gracePeriodMinutes', 'breakDurationMinutes', 'weeklyOffDay',
+          'crossesMidnight', 'overtimeEligible', 'cutoffMinutesAfterEnd',
+          'status', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'shiftId', 'shiftName', 'shiftCode', 'shiftType',
+          'startTime', 'endTime', 'reportingTime',
+          'gracePeriodMinutes', 'breakDurationMinutes', 'weeklyOffDay',
+          'crossesMidnight', 'overtimeEligible', 'cutoffMinutesAfterEnd',
+          'status', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt',
+          'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.shiftId == shiftId
+        && data.shiftName is string && data.shiftName.size() >= 2 && data.shiftName.size() <= 80
+        && data.shiftCode is string && data.shiftCode.size() >= 2 && data.shiftCode.size() <= 24
+        && data.shiftType in [
+          'General Shift', 'Morning Shift', 'Evening Shift',
+          'Day Shift', 'Night Shift', 'Rotational Shift', 'Custom Shift'
+        ]
+        && data.startTime is string && data.startTime.size() == 5
+        && data.endTime is string && data.endTime.size() == 5
+        && data.reportingTime is string && data.reportingTime.size() == 5
+        && data.gracePeriodMinutes is int && data.gracePeriodMinutes >= 0 && data.gracePeriodMinutes <= 120
+        && data.breakDurationMinutes is int && data.breakDurationMinutes >= 0 && data.breakDurationMinutes <= 180
+        && data.weeklyOffDay is string && data.weeklyOffDay.size() <= 32
+        && data.crossesMidnight is bool
+        && data.overtimeEligible is bool
+        && data.cutoffMinutesAfterEnd is int && data.cutoffMinutesAfterEnd >= 15 && data.cutoffMinutesAfterEnd <= 720
+        && data.status in ['Active', 'Inactive']
+        && data.createdBy is string && data.createdBy.size() <= 128
+        && data.updatedBy is string && data.updatedBy.size() <= 128
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidAttendanceExceptionPayload(data, exceptionId) {
+      return data.keys().hasAll([
+          'exceptionId', 'reportType', 'branchId', 'clientId', 'siteId', 'siteName',
+          'attendanceDate', 'employeeId', 'employeeName', 'shiftType',
+          'summary', 'remarks', 'photoUrl', 'photoStoragePath', 'status',
+          'reportedByUid', 'reportedByName', 'reportedByRole',
+          'reviewedByUid', 'reviewedByName', 'hrResolutionNotes', 'reviewedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'exceptionId', 'reportType', 'branchId', 'clientId', 'siteId', 'siteName',
+          'attendanceDate', 'employeeId', 'employeeName', 'shiftType',
+          'summary', 'remarks', 'photoUrl', 'photoStoragePath', 'status',
+          'reportedByUid', 'reportedByName', 'reportedByRole',
+          'reviewedByUid', 'reviewedByName', 'hrResolutionNotes', 'reviewedAt',
+          'createdAt', 'updatedAt', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && !('aadhaarNumber' in data)
+        && !('panNumber' in data)
+        && !('bankAccountNumber' in data)
+        && !('basicSalary' in data)
+        && data.exceptionId == exceptionId
+        && data.reportType in [
+          'Missing Attendance', 'Attendance Issue',
+          'Site Visit Report', 'Employee Replacement Requirement'
+        ]
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.clientId is string && data.clientId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() <= 140
+        && data.attendanceDate is string && data.attendanceDate.size() == 10
+        && data.employeeId is string && data.employeeId.size() <= 64
+        && data.employeeName is string && data.employeeName.size() <= 120
+        && data.shiftType is string && data.shiftType.size() <= 60
+        && data.summary is string && data.summary.size() >= 4 && data.summary.size() <= 160
+        && data.remarks is string && data.remarks.size() >= 6 && data.remarks.size() <= 400
+        && data.photoUrl is string && data.photoUrl.size() <= 120000
+        && data.photoStoragePath is string && data.photoStoragePath.size() <= 240
+        && data.status in ['Pending HR Review', 'Resolved', 'Rejected']
+        && data.reportedByUid is string && data.reportedByUid.size() >= 1 && data.reportedByUid.size() <= 128
+        && data.reportedByName is string && data.reportedByName.size() <= 120
+        && isValidRoleValue(data.reportedByRole)
+        && (data.reviewedByUid == null || (data.reviewedByUid is string && data.reviewedByUid.size() <= 128))
+        && (data.reviewedByName == null || (data.reviewedByName is string && data.reviewedByName.size() <= 120))
+        && data.hrResolutionNotes is string && data.hrResolutionNotes.size() <= 300
+        && (data.reviewedAt == null || (data.reviewedAt is string && data.reviewedAt.size() <= 40))
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidAttendanceApprovalPayload(data, approvalId) {
+      return data.keys().hasAll([
+          'approvalId', 'approvalType', 'branchId', 'siteId', 'siteName',
+          'requestedRadiusMeters', 'currentRadiusMeters', 'reason', 'status',
+          'requestedByUid', 'requestedByName', 'requestedByRole',
+          'reviewedByUid', 'reviewedByName', 'reviewRemarks', 'reviewedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'approvalId', 'approvalType', 'branchId', 'siteId', 'siteName',
+          'requestedRadiusMeters', 'currentRadiusMeters', 'reason', 'status',
+          'requestedByUid', 'requestedByName', 'requestedByRole',
+          'reviewedByUid', 'reviewedByName', 'reviewRemarks', 'reviewedAt',
+          'createdAt', 'updatedAt', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.approvalId == approvalId
+        && data.approvalType == 'Site Geofence Radius Override'
+        && data.branchId is string && data.branchId.size() >= 1 && data.branchId.size() <= 64
+        && data.siteId is string && data.siteId.size() >= 1 && data.siteId.size() <= 64
+        && data.siteName is string && data.siteName.size() <= 140
+        && data.requestedRadiusMeters is int && data.requestedRadiusMeters >= 20 && data.requestedRadiusMeters <= 5000
+        && data.currentRadiusMeters is int && data.currentRadiusMeters >= 20 && data.currentRadiusMeters <= 5000
+        && data.reason is string && data.reason.size() >= 6 && data.reason.size() <= 300
+        && data.status in ['Pending', 'Approved', 'Rejected']
+        && data.requestedByUid is string && data.requestedByUid.size() >= 1 && data.requestedByUid.size() <= 128
+        && data.requestedByName is string && data.requestedByName.size() <= 120
+        && isValidRoleValue(data.requestedByRole)
+        && (data.reviewedByUid == null || (data.reviewedByUid is string && data.reviewedByUid.size() <= 128))
+        && (data.reviewedByName == null || (data.reviewedByName is string && data.reviewedByName.size() <= 120))
+        && data.reviewRemarks is string && data.reviewRemarks.size() <= 300
+        && (data.reviewedAt == null || (data.reviewedAt is string && data.reviewedAt.size() <= 40))
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
     }
 
     function isValidSiteAttendanceSummaryPayload(data, summaryId) {
@@ -941,8 +1106,14 @@ service cloud.firestore {
           isAdmin()
           || (
             isHR()
-            && hasPermission('employee.manage')
-            && incoming().role == 'employee'
+            && hasAnyPermission(['employee.manage', 'employee.create'])
+            && incoming().role in ['employee', 'field_officer']
+            && isAuthorizedForBranch(incoming().branchId)
+          )
+          || (
+            isHR()
+            && hasPermission('site.create')
+            && incoming().role == 'site'
             && isAuthorizedForBranch(incoming().branchId)
           )
         );
@@ -956,17 +1127,22 @@ service cloud.firestore {
           || (
             request.auth.uid == uid
             && existing().isActive == true
-            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'updatedAt'])
+            && incoming().role == existing().role
+            && incoming().branchId == existing().branchId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'fullName', 'phone', 'profilePhoto', 'initialAccessKey', 'updatedAt'
+            ])
           )
           || (
             isHR()
-            && hasPermission('employee.manage')
-            && existing().role == 'employee'
+            && hasAnyPermission(['employee.manage', 'employee.edit', 'site.edit'])
+            && existing().role in ['employee', 'field_officer', 'site']
             && isAuthorizedForBranch(existing().branchId)
-            && incoming().role == 'employee'
+            && incoming().role == existing().role
             && incoming().branchId == existing().branchId
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'fullName', 'phone', 'assignedSiteIds', 'isActive', 'updatedAt'
+              'fullName', 'phone', 'profilePhoto', 'designationLabel',
+              'assignedBranches', 'assignedSiteIds', 'isActive', 'updatedAt'
             ])
           )
         );
@@ -2011,6 +2187,8 @@ service cloud.firestore {
             isEmployee()
             && (incoming().employeeUid == request.auth.uid || incoming().linkedUid == request.auth.uid)
             && incoming().isVerifiedByHr == false
+            && (!('isPayrollEligible' in incoming()) || incoming().isPayrollEligible == false)
+            && (!('verificationStatus' in incoming()) || incoming().verificationStatus == 'Pending')
             && incoming().approvedOvertimeMinutes == 0
             && incoming().checkInMethod in ['GPS', 'QR']
           )
@@ -2050,9 +2228,12 @@ service cloud.firestore {
             && existing().isVerifiedByHr == false
             && existing().checkOutAt == null
             && incoming().isVerifiedByHr == false
+            && (!('isPayrollEligible' in incoming()) || incoming().isPayrollEligible == false)
+            && (!('verificationStatus' in incoming()) || incoming().verificationStatus == 'Pending')
             && incoming().approvedOvertimeMinutes == existing().approvedOvertimeMinutes
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'checkOutAt', 'checkOutMethod', 'checkOutGeo',
+              'checkOutAt', 'checkOutMethod', 'checkOutGeo', 'checkOutPhoto',
+              'locationStatus', 'verificationStatus', 'isPayrollEligible',
               'qrSessionId', 'qrVerificationStatus', 'deviceMetadata',
               'totalGrossMinutes', 'totalDutyMinutes', 'totalDutyHours',
               'lateArrivalMinutes', 'earlyDepartureMinutes', 'overtimeMinutes',
@@ -2246,6 +2427,153 @@ service cloud.firestore {
           || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
           || (isEmployee() && incoming().branchId == callerData().branchId)
         );
+
+      allow delete: if false;
+    }
+
+    match /shifts/{shiftId} {
+      allow get: if isSignedIn()
+        && isValidId(shiftId)
+        && (isAdmin() || isHR() || isFieldOfficer() || isEmployee())
+        && existing().shiftId == shiftId;
+
+      allow list: if isSignedIn()
+        && (isAdmin() || isHR() || isFieldOfficer() || isEmployee())
+        && existing().status in ['Active', 'Inactive'];
+
+      allow create: if isSignedIn()
+        && isValidId(shiftId)
+        && isValidShiftMasterPayload(incoming(), shiftId)
+        && (
+          isAdmin()
+          || (isHR() && hasPermission('roster.create'))
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(shiftId)
+        && isValidShiftMasterPayload(incoming(), shiftId)
+        && incoming().shiftId == existing().shiftId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (isHR() && hasPermission('roster.create'))
+        );
+
+      allow delete: if false; // Deactivate shift via status == 'Inactive'
+    }
+
+    match /attendanceExceptions/{exceptionId} {
+      allow get: if isSignedIn()
+        && isValidId(exceptionId)
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForAttendanceBranch(existing().branchId))
+          || (
+            isFieldOfficer()
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || existing().reportedByUid == request.auth.uid
+            )
+          )
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForAttendanceBranch(existing().branchId))
+          || (
+            isFieldOfficer()
+            && (
+              existing().siteId in callerData().assignedSiteIds
+              || existing().reportedByUid == request.auth.uid
+            )
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(exceptionId)
+        && isValidAttendanceExceptionPayload(incoming(), exceptionId)
+        && incoming().reportedByUid == request.auth.uid
+        && incoming().status == 'Pending HR Review'
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+          || (isFieldOfficer() && incoming().siteId in callerData().assignedSiteIds)
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(exceptionId)
+        && isValidAttendanceExceptionPayload(incoming(), exceptionId)
+        && existing().status == 'Pending HR Review'
+        && incoming().exceptionId == existing().exceptionId
+        && incoming().reportedByUid == existing().reportedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().status in ['Resolved', 'Rejected']
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && hasAnyPermission(['attendance.verify', 'attendance.approve', 'attendance.edit'])
+            && isAuthorizedForBranch(existing().branchId)
+          )
+        )
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'reviewedByUid', 'reviewedByName',
+          'hrResolutionNotes', 'reviewedAt', 'updatedAt', 'serverUpdatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    match /attendanceApprovals/{approvalId} {
+      allow get: if isSignedIn()
+        && isValidId(approvalId)
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && (
+              existing().requestedByUid == request.auth.uid
+              || isAuthorizedForAttendanceBranch(existing().branchId)
+            )
+          )
+        );
+
+      allow list: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            isHR()
+            && (
+              existing().requestedByUid == request.auth.uid
+              || isAuthorizedForAttendanceBranch(existing().branchId)
+            )
+          )
+        );
+
+      allow create: if isSignedIn()
+        && isValidId(approvalId)
+        && isValidAttendanceApprovalPayload(incoming(), approvalId)
+        && incoming().requestedByUid == request.auth.uid
+        && incoming().status == 'Pending'
+        && (
+          isAdmin()
+          || (isHR() && isAuthorizedForBranch(incoming().branchId))
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(approvalId)
+        && isValidAttendanceApprovalPayload(incoming(), approvalId)
+        && existing().status == 'Pending'
+        && incoming().approvalId == existing().approvalId
+        && incoming().requestedByUid == existing().requestedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().status in ['Approved', 'Rejected']
+        && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'reviewedByUid', 'reviewedByName',
+          'reviewRemarks', 'reviewedAt', 'updatedAt', 'serverUpdatedAt'
+        ]);
 
       allow delete: if false;
     }

@@ -9,6 +9,7 @@ import { AuditLogsPage } from '../pages/admin/AuditLogsPage';
 import { BranchManagementPage } from '../pages/admin/BranchManagementPage';
 import { HRManagementPage } from '../pages/admin/HRManagementPage';
 import { PermissionManagementPage } from '../pages/admin/PermissionManagementPage';
+import { PortalCredentialsPage } from '../pages/admin/PortalCredentialsPage';
 import { ForgotPasswordPage } from '../pages/common/ForgotPasswordPage';
 import { PortalLoginPage } from '../pages/common/PortalLoginPage';
 import { ProfilePage } from '../pages/common/ProfilePage';
@@ -28,6 +29,7 @@ import { DutyRosterPage } from '../pages/shared/DutyRosterPage';
 import { EmployeeAvailabilityPage } from '../pages/shared/EmployeeAvailabilityPage';
 import { EmployeeManagementPage } from '../pages/shared/EmployeeManagementPage';
 import { EmployeeProfilePage } from '../pages/shared/EmployeeProfilePage';
+import { FieldOfficerManagementPage } from '../pages/shared/FieldOfficerManagementPage';
 import { MasterReportsPage } from '../pages/shared/MasterReportsPage';
 import { ServiceManagementPage } from '../pages/shared/ServiceManagementPage';
 import { SiteAssignmentPage } from '../pages/shared/SiteAssignmentPage';
@@ -123,6 +125,7 @@ export const AppRoutes: React.FC = () => {
         <Route index element={<AdminDashboard section="overview" />} />
         <Route path="branches" element={<BranchManagementPage />} />
         <Route path="hr-management" element={<HRManagementPage />} />
+        <Route path="field-officers" element={<FieldOfficerManagementPage />} />
         <Route path="clients" element={<ClientManagementPage />} />
         <Route path="sites" element={<SiteManagementPage />} />
         <Route path="employees" element={<EmployeeManagementPage />} />
@@ -135,6 +138,7 @@ export const AppRoutes: React.FC = () => {
         <Route path="services" element={<ServiceManagementPage />} />
         <Route path="designations" element={<DesignationManagementPage />} />
         <Route path="permissions" element={<PermissionManagementPage />} />
+        <Route path="credentials" element={<PortalCredentialsPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="audit-logs" element={<AuditLogsPage />} />
         <Route path="reports" element={<MasterReportsPage />} />
@@ -187,6 +191,17 @@ export const AppRoutes: React.FC = () => {
               moduleLabel="Employee Profile"
             >
               <EmployeeProfilePage />
+            </HRPermissionGuard>
+          }
+        />
+        <Route
+          path="field-officers"
+          element={
+            <HRPermissionGuard
+              anyOf={['employee.view', 'employee.manage']}
+              moduleLabel="Field Officer Management"
+            >
+              <FieldOfficerManagementPage />
             </HRPermissionGuard>
           }
         />

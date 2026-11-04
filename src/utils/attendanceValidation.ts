@@ -1,6 +1,9 @@
 import {
+  AttendanceLocationStatus,
   AttendanceRecord,
+  AttendanceReportType,
   AttendanceStatus,
+  AttendanceVerificationStatus,
   DutyRosterRecord,
   EmployeeAttendanceSummaryRollup,
   SiteRecord,
@@ -13,8 +16,133 @@ import {
   parseTimeToMinutes,
 } from './deploymentValidation';
 
-export const DEFAULT_ALLOWED_RADIUS_METERS = 150;
+export const DEFAULT_ALLOWED_RADIUS_METERS = 200;
 export const DEFAULT_GPS_ACCURACY_THRESHOLD_METERS = 100;
+export const DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES = 180;
+
+/**
+ * Returns YYYY-MM-DD in Asia/Kolkata (IST) timezone for consistent Indian shift boundaries.
+ */
+export function getTodayIstIsoDate(now: Date = new Date()): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(now);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // Fallback below
+  }
+  return now.toISOString().slice(0, 10);
+}
+
+export function formatIstTimeOnly(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return '—';
+  try {
+    return dt.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+  } catch {
+    return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+}
+
+export function deriveAttendanceVerificationStatus(
+  record: AttendanceRecord
+): AttendanceVerificationStatus {
+  if (record.verificationStatus) {
+    return record.verificationStatus;
+  }
+  if (record.verificationOutcome === 'Rejected' || record.status === 'Rejected') {
+    return 'Rejected';
+  }
+  if (record.isVerifiedByHr) {
+    return record.verificationOutcome === 'Manual_Override' ? 'Exception Approved' : 'Verified';
+  }
+  return 'Pending';
+}
+
+export function deriveAttendanceLocationStatus(
+  record: AttendanceRecord
+): AttendanceLocationStatus {
+  if (record.locationStatus) {
+    return record.locationStatus;
+  }
+  if (record.checkInGeo?.locationStatus) {
+    return record.checkInGeo.locationStatus;
+  }
+  if (record.verificationOutcome === 'Outside_Geofence') {
+    return 'Outside Geofence';
+  }
+  if (record.verificationOutcome === 'Low_GPS_Accuracy') {
+    return 'GPS Accuracy Low';
+  }
+  if (record.verificationOutcome === 'GPS_Unavailable') {
+    return 'Location Unavailable';
+  }
+  if (record.checkInGeo?.withinGeofence) {
+    return 'Within Geofence';
+  }
+  if (record.checkInMethod === 'QR' || record.checkInMethod === 'Manual_HR') {
+    return 'Within Geofence';
+  }
+  return 'Location Unavailable';
+}
+
+/**
+ * Strict Payroll Gate: ONLY HR-Verified or Exception-Approved attendance records
+ * are eligible for Payroll computation. Unverified, offline-pending, Absent, or Rejected
+ * records are NEVER payroll-eligible.
+ */
+export function isAttendancePayrollEligible(record: AttendanceRecord): boolean {
+  if (typeof record.isPayrollEligible === 'boolean') {
+    return record.isPayrollEligible;
+  }
+  const vStatus = deriveAttendanceVerificationStatus(record);
+  if (vStatus !== 'Verified' && vStatus !== 'Exception Approved') {
+    return false;
+  }
+  if (record.status === 'Rejected' || record.status === 'Absent' || record.status === 'Pending') {
+    return false;
+  }
+  return Boolean(record.isVerifiedByHr);
+}
+
+/**
+ * Checks whether a scheduled duty shift has passed its post-shift attendance cut-off deadline.
+ * Prevents scheduled employees from being prematurely labeled Absent before their shift ends + grace cutoff.
+ */
+export function isShiftPastCutoff(params: {
+  dutyDate: string;
+  dutyStartTime: string;
+  dutyEndTime: string;
+  cutoffMinutesAfterEnd?: number;
+  nowMs?: number;
+}): boolean {
+  const {
+    dutyDate,
+    dutyStartTime,
+    dutyEndTime,
+    cutoffMinutesAfterEnd = DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES,
+    nowMs = Date.now(),
+  } = params;
+  if (!isValidIsoDate(dutyDate) || !isValidTime24h(dutyStartTime) || !isValidTime24h(dutyEndTime)) {
+    return false;
+  }
+  const shiftMeta = computeRosterShiftMetrics(dutyDate, dutyStartTime, dutyEndTime, 0);
+  const shiftEndMs = combineDateAndTimeToMs(shiftMeta.dutyEndDate, dutyEndTime);
+  return nowMs > shiftEndMs + Math.max(0, cutoffMinutesAfterEnd) * 60_000;
+}
 
 /**
  * Extracts { latitude, longitude } from a raw coordinate pair ("18.7606, 73.8636")
@@ -62,7 +190,10 @@ export function isValidLatLng(lat: number | null | undefined, lng: number | null
   );
 }
 
-export function resolveSiteGeoSettings(site: SiteRecord): {
+export function resolveSiteGeoSettings(
+  site: SiteRecord,
+  fallbackDefaultRadius: number = DEFAULT_ALLOWED_RADIUS_METERS
+): {
   latitude: number | null;
   longitude: number | null;
   allowedRadiusMeters: number;
@@ -85,7 +216,7 @@ export function resolveSiteGeoSettings(site: SiteRecord): {
 
   const allowedRadiusMeters = Math.min(
     5000,
-    Math.max(20, Number(site.allowedRadiusMeters) || DEFAULT_ALLOWED_RADIUS_METERS)
+    Math.max(20, Number(site.allowedRadiusMeters) || fallbackDefaultRadius || DEFAULT_ALLOWED_RADIUS_METERS)
   );
   const gpsAccuracyThresholdMeters = Math.min(
     1000,
@@ -124,7 +255,7 @@ export function calculateHaversineDistanceMeters(
 
 /**
  * Computes overnight-aware shift schedule timing.
- * Example: 20:00 -> 08:00 crosses midnight onto dutyDate + 1 (720 gross mins).
+ * Example: 22:00 -> 06:00 crosses midnight onto dutyDate + 1 (480 gross mins).
  */
 export function computeRosterShiftMetrics(
   dutyDate: string,
@@ -194,7 +325,7 @@ export function computeCheckInLateMinutes(
 
 /**
  * Computes total gross/net duty minutes, early departure, overtime, and status upon Check-Out.
- * Fully supports overnight shifts crossing midnight (e.g., 20:00 Day 1 -> 08:00 Day 2).
+ * Fully supports overnight shifts crossing midnight (e.g., 22:00 Day 1 -> 06:00 Day 2).
  */
 export function computeCheckOutMetrics(params: {
   attendanceDate: string;
@@ -205,6 +336,7 @@ export function computeCheckOutMetrics(params: {
   checkInIso: string;
   checkOutIso: string;
   preserveExceptionStatus?: boolean;
+  overtimeMinimumMinutes?: number;
 }): {
   totalGrossMinutes: number;
   totalDutyMinutes: number;
@@ -223,6 +355,7 @@ export function computeCheckOutMetrics(params: {
     checkInIso,
     checkOutIso,
     preserveExceptionStatus,
+    overtimeMinimumMinutes = 15,
   } = params;
 
   const shiftMeta = computeRosterShiftMetrics(
@@ -259,9 +392,10 @@ export function computeCheckOutMetrics(params: {
   const earlyDepartureMinutes =
     outMs < scheduledEndMs ? Math.max(0, Math.round((scheduledEndMs - outMs) / 60000)) : 0;
 
-  // Overtime counts extra minutes worked beyond netScheduledMinutes (threshold >= 15 mins)
+  // Overtime counts extra minutes worked beyond netScheduledMinutes (threshold >= overtimeMinimumMinutes)
   const extraBeyondSchedule = totalDutyMinutes - shiftMeta.netScheduledMinutes;
-  const overtimeMinutes = extraBeyondSchedule >= 15 ? extraBeyondSchedule : 0;
+  const overtimeMinutes =
+    extraBeyondSchedule >= Math.max(5, overtimeMinimumMinutes) ? extraBeyondSchedule : 0;
 
   let derivedStatus: AttendanceStatus = 'Present';
   if (preserveExceptionStatus) {
@@ -361,7 +495,6 @@ export function buildRosterTargetDates(params: {
     if (scheduleMode === 'Weekly') {
       finalEndDate = addDaysToIsoDate(startDate, 6);
     } else {
-      // End of the month of startDate
       const [y, m] = startDate.split('-').map((n) => parseInt(n, 10));
       const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
       finalEndDate = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
@@ -457,21 +590,26 @@ export function buildEmployeeAttendanceRollups(
       holidayDays: 0,
       leaveDays: 0,
       exceptionDays: 0,
+      verifiedPayrollDays: 0,
       totalNetHours: 0,
       approvedOvertimeHours: 0,
       pendingOvertimeHours: 0,
     };
 
-    if (r.status === 'Present') existing.presentDays += 1;
+    if (r.status === 'Present' || r.status === 'On Duty') existing.presentDays += 1;
     else if (r.status === 'Late') {
       existing.presentDays += 1;
       existing.lateDays += 1;
     } else if (r.status === 'Half Day') existing.halfDays += 1;
-    else if (r.status === 'Absent') existing.absentDays += 1;
+    else if (r.status === 'Absent' || r.status === 'Rejected') existing.absentDays += 1;
     else if (r.status === 'Weekly Off') existing.weeklyOffDays += 1;
     else if (r.status === 'Holiday') existing.holidayDays += 1;
     else if (r.status === 'Leave') existing.leaveDays += 1;
-    else if (r.status === 'Exception') existing.exceptionDays += 1;
+    else if (r.status === 'Exception' || r.status === 'Incomplete') existing.exceptionDays += 1;
+
+    if (isAttendancePayrollEligible(r)) {
+      existing.verifiedPayrollDays += 1;
+    }
 
     existing.totalNetHours =
       Math.round((existing.totalNetHours + (r.totalDutyHours || 0)) * 100) / 100;
@@ -490,4 +628,240 @@ export function buildEmployeeAttendanceRollups(
   return Array.from(byEmployee.values()).sort((a, b) =>
     a.employeeName.localeCompare(b.employeeName)
   );
+}
+
+/**
+ * Generates tabular columns, rows, and summary totals for all 12 Phase 4 Attendance Reports.
+ */
+export function buildPhase4ReportDataset(params: {
+  reportType: AttendanceReportType;
+  records: AttendanceRecord[];
+}): {
+  columns: Array<{ header: string; align?: 'left' | 'right' | 'center' }>;
+  rows: Array<Array<string | number>>;
+  summaryMetrics: Array<{ label: string; value: string | number }>;
+} {
+  const { reportType, records } = params;
+
+  const totalPresent = records.filter(
+    (r) => r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day' || r.status === 'On Duty'
+  ).length;
+  const totalAbsent = records.filter((r) => r.status === 'Absent' || r.status === 'Rejected').length;
+  const totalLate = records.filter((r) => r.lateArrivalMinutes > 0 || r.status === 'Late').length;
+  const totalPayrollReady = records.filter((r) => isAttendancePayrollEligible(r)).length;
+  const totalNetHrs = Math.round(records.reduce((s, r) => s + (r.totalDutyHours || 0), 0) * 100) / 100;
+  const totalApprovedOtHrs =
+    Math.round(
+      (records.reduce((s, r) => s + (r.overtimeStatus === 'Approved' ? r.approvedOvertimeMinutes : 0), 0) /
+        60) *
+        100
+    ) / 100;
+
+  const baseSummary = [
+    { label: 'Total Records', value: records.length },
+    { label: 'Present / Late', value: totalPresent },
+    { label: 'Absent / Rejected', value: totalAbsent },
+    { label: 'Late Arrivals', value: totalLate },
+    { label: 'Payroll-Ready (HR Verified)', value: totalPayrollReady },
+    { label: 'Net Duty Hours', value: `${totalNetHrs}h` },
+    { label: 'Approved Overtime', value: `${totalApprovedOtHrs}h` },
+  ];
+
+  // Grouped rollup helper for Site / Client / Branch / Service reports
+  const buildGroupedSummary = (
+    groupHeader: string,
+    keyFn: (r: AttendanceRecord) => string,
+    labelFn: (r: AttendanceRecord) => string
+  ) => {
+    const map = new Map<
+      string,
+      {
+        label: string;
+        records: number;
+        present: number;
+        late: number;
+        absent: number;
+        missingOut: number;
+        verified: number;
+        hours: number;
+        otHours: number;
+      }
+    >();
+
+    for (const r of records) {
+      const k = keyFn(r) || 'UNSPECIFIED';
+      const entry = map.get(k) ?? {
+        label: labelFn(r) || k,
+        records: 0,
+        present: 0,
+        late: 0,
+        absent: 0,
+        missingOut: 0,
+        verified: 0,
+        hours: 0,
+        otHours: 0,
+      };
+      entry.records += 1;
+      if (r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day' || r.status === 'On Duty') {
+        entry.present += 1;
+      }
+      if (r.lateArrivalMinutes > 0 || r.status === 'Late') entry.late += 1;
+      if (r.status === 'Absent' || r.status === 'Rejected') entry.absent += 1;
+      if (r.checkInAt && !r.checkOutAt) entry.missingOut += 1;
+      if (isAttendancePayrollEligible(r)) entry.verified += 1;
+      entry.hours = Math.round((entry.hours + (r.totalDutyHours || 0)) * 100) / 100;
+      if (r.overtimeStatus === 'Approved') {
+        entry.otHours = Math.round((entry.otHours + (r.approvedOvertimeMinutes || 0) / 60) * 100) / 100;
+      }
+      map.set(k, entry);
+    }
+
+    const rows = Array.from(map.values())
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map((item) => [
+        item.label,
+        item.records,
+        item.present,
+        item.late,
+        item.absent,
+        item.missingOut,
+        item.verified,
+        `${item.hours}h`,
+        `${item.otHours}h`,
+      ]);
+
+    return {
+      columns: [
+        { header: groupHeader, align: 'left' as const },
+        { header: 'Total Logs', align: 'right' as const },
+        { header: 'Present', align: 'right' as const },
+        { header: 'Late', align: 'right' as const },
+        { header: 'Absent', align: 'right' as const },
+        { header: 'Missing Out', align: 'right' as const },
+        { header: 'Payroll Verified', align: 'right' as const },
+        { header: 'Net Hours', align: 'right' as const },
+        { header: 'Approved OT', align: 'right' as const },
+      ],
+      rows,
+      summaryMetrics: baseSummary,
+    };
+  };
+
+  if (reportType === 'Employee-wise Attendance Report' || reportType === 'Weekly Attendance Report' || reportType === 'Monthly Attendance Report') {
+    const rollups = buildEmployeeAttendanceRollups(records);
+    return {
+      columns: [
+        { header: 'Employee ID', align: 'left' },
+        { header: 'Employee Name', align: 'left' },
+        { header: 'Site', align: 'left' },
+        { header: 'Designation', align: 'left' },
+        { header: 'Present', align: 'right' },
+        { header: 'Late', align: 'right' },
+        { header: 'Half Day', align: 'right' },
+        { header: 'Absent', align: 'right' },
+        { header: 'W-Off / Leave', align: 'right' },
+        { header: 'Payroll Days', align: 'right' },
+        { header: 'Net Hours', align: 'right' },
+        { header: 'Approved OT', align: 'right' },
+      ],
+      rows: rollups.map((u) => [
+        u.employeeId,
+        u.employeeName,
+        u.siteName,
+        u.designationName,
+        u.presentDays,
+        u.lateDays,
+        u.halfDays,
+        u.absentDays,
+        u.weeklyOffDays + u.holidayDays + u.leaveDays,
+        u.verifiedPayrollDays,
+        `${u.totalNetHours}h`,
+        `${u.approvedOvertimeHours}h`,
+      ]),
+      summaryMetrics: baseSummary,
+    };
+  }
+
+  if (reportType === 'Site-wise Attendance Report') {
+    return buildGroupedSummary(
+      'Deployment Site',
+      (r) => r.siteId,
+      (r) => `${r.siteName} (${r.siteId})`
+    );
+  }
+
+  if (reportType === 'Client-wise Attendance Report') {
+    return buildGroupedSummary(
+      'Client Organization',
+      (r) => r.clientId || r.clientName,
+      (r) => r.clientName || r.clientId
+    );
+  }
+
+  if (reportType === 'Branch-wise Attendance Report') {
+    return buildGroupedSummary(
+      'REXON Branch',
+      (r) => r.branchId,
+      (r) => `${r.branchName || r.branchId} (${r.branchId})`
+    );
+  }
+
+  if (reportType === 'Service-wise Attendance Report') {
+    return buildGroupedSummary(
+      'Service & Designation',
+      (r) => `${r.serviceCategory}:${r.designationName}`,
+      (r) => `${r.serviceCategory} · ${r.designationName}`
+    );
+  }
+
+  // Filtered detailed row reports
+  let subset = records;
+  if (reportType === 'Late Arrival Report') {
+    subset = records.filter((r) => r.lateArrivalMinutes > 0 || r.status === 'Late');
+  } else if (reportType === 'Overtime Report') {
+    subset = records.filter((r) => r.overtimeMinutes > 0 || r.approvedOvertimeMinutes > 0);
+  } else if (reportType === 'Missing Check-out Report') {
+    subset = records.filter((r) => Boolean(r.checkInAt) && !r.checkOutAt);
+  } else if (reportType === 'Attendance Exception Report') {
+    subset = records.filter(
+      (r) =>
+        r.status === 'Exception' ||
+        r.verificationOutcome === 'Outside_Geofence' ||
+        r.verificationOutcome === 'Low_GPS_Accuracy' ||
+        r.verificationOutcome === 'GPS_Unavailable'
+    );
+  }
+
+  return {
+    columns: [
+      { header: 'Date', align: 'left' },
+      { header: 'Employee', align: 'left' },
+      { header: 'Site & Client', align: 'left' },
+      { header: 'Service / Shift', align: 'left' },
+      { header: 'Check-In', align: 'left' },
+      { header: 'Check-Out', align: 'left' },
+      { header: 'GPS / Location', align: 'left' },
+      { header: 'Duty Hrs', align: 'right' },
+      { header: 'Late / OT', align: 'right' },
+      { header: 'Status', align: 'left' },
+      { header: 'Verification', align: 'left' },
+    ],
+    rows: subset.map((r) => [
+      r.attendanceDate,
+      `${r.employeeName} (${r.employeeId})`,
+      `${r.siteName}${r.clientName ? ` · ${r.clientName}` : ''}`,
+      `${r.designationName} · ${r.shiftType} (${r.scheduledStartTime}–${r.scheduledEndTime})`,
+      formatIstTimeOnly(r.checkInAt),
+      formatIstTimeOnly(r.checkOutAt),
+      deriveAttendanceLocationStatus(r),
+      `${r.totalDutyHours}h`,
+      `L:${r.lateArrivalMinutes}m / OT:${r.overtimeMinutes}m`,
+      r.status,
+      `${deriveAttendanceVerificationStatus(r)}${isAttendancePayrollEligible(r) ? ' (Payroll)' : ''}`,
+    ]),
+    summaryMetrics: [
+      { label: 'Matching Rows', value: subset.length },
+      ...baseSummary.slice(1),
+    ],
+  };
 }

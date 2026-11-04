@@ -11,14 +11,21 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  AttendanceApprovalRecord,
   AttendanceAuditCategory,
   AttendanceAuditRecord,
   AttendanceCorrectionRequest,
   AttendanceDeviceMetadata,
+  AttendanceExceptionReport,
   AttendanceGeoMetadata,
+  AttendanceLocationStatus,
+  AttendancePhotoMetadata,
+  AttendancePolicyConfig,
   AttendanceRecord,
   AttendanceStatus,
+  AttendanceTimeCorrectionEntry,
   AttendanceVerificationOutcome,
+  AttendanceVerificationStatus,
   CreateDutyRosterInput,
   DutyRosterRecord,
   EmployeeAssignmentRecord,
@@ -29,16 +36,20 @@ import {
   EmployeeRecord,
   EmployeeTodayDutyContext,
   ManualHrAttendanceInput,
+  OfflineAttendanceQueueItem,
   OperationType,
   RexonUser,
   SanitizedSiteAttendanceSummaryRecord,
   SanitizedSiteServiceAttendanceRow,
   SanitizedSiteShiftAttendanceRow,
+  ShiftMasterRecord,
   SiteGeoQrConfigInput,
   SiteQrSessionRecord,
   SiteRecord,
   SubmitAttendanceCorrectionInput,
+  SubmitFieldOfficerExceptionInput,
   UpdateDutyRosterInput,
+  UpsertShiftMasterInput,
 } from '../../types';
 import {
   buildRosterTargetDates,
@@ -47,6 +58,11 @@ import {
   computeCheckInLateMinutes,
   computeCheckOutMetrics,
   computeRosterShiftMetrics,
+  DEFAULT_ALLOWED_RADIUS_METERS,
+  DEFAULT_GPS_ACCURACY_THRESHOLD_METERS,
+  DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES,
+  deriveAttendanceLocationStatus,
+  deriveAttendanceVerificationStatus,
   detectDutyRosterConflict,
   isValidLatLng,
   resolveSiteGeoSettings,
@@ -62,7 +78,7 @@ import {
 } from '../../utils/deploymentValidation';
 import { getAuthorizedBranchIds, hasUserPermission } from '../../utils/portalConfig';
 import { sanitizeInput } from '../../utils/validation';
-import { firestoreDb, isFirebaseConfigured } from '../firebase/config';
+import { firestoreDb, isFirebaseConfigured, processInstantPhotoAsset } from '../firebase/config';
 import { listEmployeeAssignments } from './assignmentService';
 import { getEmployeeById, getOwnEmployeeRecord, listEmployees } from './employeeService';
 import { handleFirestoreError } from './errorHandler';
@@ -79,11 +95,16 @@ import {
 } from './masterDataService';
 
 const ATTENDANCE_STORAGE_KEY = 'rexon_phase4_attendance_v1';
+const OFFLINE_QUEUE_STORAGE_KEY = 'rexon_phase4_offline_queue_v1';
+const POLICY_CONFIG_STORAGE_KEY = 'rexon_phase4_policy_config_v1';
 
 interface LocalAttendanceStore {
+  shifts: ShiftMasterRecord[];
   dutyRosters: DutyRosterRecord[];
   attendance: AttendanceRecord[];
   attendanceCorrections: AttendanceCorrectionRequest[];
+  attendanceExceptions: AttendanceExceptionReport[];
+  attendanceApprovals: AttendanceApprovalRecord[];
   attendanceQrSessions: SiteQrSessionRecord[];
   employeeNotifications: EmployeeNotificationRecord[];
   attendanceAuditLogs: AttendanceAuditRecord[];
@@ -106,14 +127,123 @@ function useLiveFirestore(isPreviewSession: boolean): boolean {
   return isFirebaseConfigured && Boolean(firestoreDb) && !isPreviewSession;
 }
 
+function buildDefaultShiftMasters(): ShiftMasterRecord[] {
+  const nowIso = '2026-01-01T00:00:00.000Z';
+  return [
+    {
+      shiftId: 'SHF-DEFAULT-GEN',
+      shiftName: 'General Shift',
+      shiftCode: 'GEN-09',
+      shiftType: 'General Shift',
+      startTime: '09:00',
+      endTime: '18:00',
+      reportingTime: '08:45',
+      gracePeriodMinutes: 15,
+      breakDurationMinutes: 60,
+      weeklyOffDay: 'Sunday',
+      crossesMidnight: false,
+      overtimeEligible: true,
+      cutoffMinutesAfterEnd: 180,
+      status: 'Active',
+      createdBy: 'SYSTEM',
+      updatedBy: 'SYSTEM',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
+    {
+      shiftId: 'SHF-DEFAULT-MOR',
+      shiftName: 'Morning Shift',
+      shiftCode: 'MOR-06',
+      shiftType: 'Morning Shift',
+      startTime: '06:00',
+      endTime: '14:00',
+      reportingTime: '05:45',
+      gracePeriodMinutes: 10,
+      breakDurationMinutes: 30,
+      weeklyOffDay: 'Rotational',
+      crossesMidnight: false,
+      overtimeEligible: true,
+      cutoffMinutesAfterEnd: 180,
+      status: 'Active',
+      createdBy: 'SYSTEM',
+      updatedBy: 'SYSTEM',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
+    {
+      shiftId: 'SHF-DEFAULT-EVE',
+      shiftName: 'Evening Shift',
+      shiftCode: 'EVE-14',
+      shiftType: 'Evening Shift',
+      startTime: '14:00',
+      endTime: '22:00',
+      reportingTime: '13:45',
+      gracePeriodMinutes: 10,
+      breakDurationMinutes: 30,
+      weeklyOffDay: 'Rotational',
+      crossesMidnight: false,
+      overtimeEligible: true,
+      cutoffMinutesAfterEnd: 180,
+      status: 'Active',
+      createdBy: 'SYSTEM',
+      updatedBy: 'SYSTEM',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
+    {
+      shiftId: 'SHF-DEFAULT-NGT',
+      shiftName: 'Night Shift',
+      shiftCode: 'NGT-22',
+      shiftType: 'Night Shift',
+      startTime: '22:00',
+      endTime: '06:00',
+      reportingTime: '21:45',
+      gracePeriodMinutes: 15,
+      breakDurationMinutes: 30,
+      weeklyOffDay: 'Rotational',
+      crossesMidnight: true,
+      overtimeEligible: true,
+      cutoffMinutesAfterEnd: 180,
+      status: 'Active',
+      createdBy: 'SYSTEM',
+      updatedBy: 'SYSTEM',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
+    {
+      shiftId: 'SHF-DEFAULT-DAY12',
+      shiftName: '12-Hour Day Guard Shift',
+      shiftCode: 'DAY-08',
+      shiftType: 'Day Shift',
+      startTime: '08:00',
+      endTime: '20:00',
+      reportingTime: '07:45',
+      gracePeriodMinutes: 15,
+      breakDurationMinutes: 60,
+      weeklyOffDay: 'Rotational',
+      crossesMidnight: false,
+      overtimeEligible: true,
+      cutoffMinutesAfterEnd: 180,
+      status: 'Active',
+      createdBy: 'SYSTEM',
+      updatedBy: 'SYSTEM',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
+  ];
+}
+
 /**
- * Starts strictly empty — ZERO fake or hardcoded roster/attendance data.
+ * Starts strictly empty for operational records — ZERO fake roster/attendance rows.
  */
 function buildEmptyAttendanceStore(): LocalAttendanceStore {
   return {
+    shifts: buildDefaultShiftMasters(),
     dutyRosters: [],
     attendance: [],
     attendanceCorrections: [],
+    attendanceExceptions: [],
+    attendanceApprovals: [],
     attendanceQrSessions: [],
     employeeNotifications: [],
     attendanceAuditLogs: [],
@@ -127,10 +257,20 @@ function readLocalAttendanceStore(): LocalAttendanceStore {
     if (!raw) return buildEmptyAttendanceStore();
     const parsed = JSON.parse(raw) as Partial<LocalAttendanceStore>;
     return {
+      shifts:
+        Array.isArray(parsed.shifts) && parsed.shifts.length > 0
+          ? parsed.shifts
+          : buildDefaultShiftMasters(),
       dutyRosters: Array.isArray(parsed.dutyRosters) ? parsed.dutyRosters : [],
       attendance: Array.isArray(parsed.attendance) ? parsed.attendance : [],
       attendanceCorrections: Array.isArray(parsed.attendanceCorrections)
         ? parsed.attendanceCorrections
+        : [],
+      attendanceExceptions: Array.isArray(parsed.attendanceExceptions)
+        ? parsed.attendanceExceptions
+        : [],
+      attendanceApprovals: Array.isArray(parsed.attendanceApprovals)
+        ? parsed.attendanceApprovals
         : [],
       attendanceQrSessions: Array.isArray(parsed.attendanceQrSessions)
         ? parsed.attendanceQrSessions
@@ -158,6 +298,464 @@ function writeLocalAttendanceStore(store: LocalAttendanceStore): void {
     // Ignore storage quota warnings
   }
   notifyAttendanceListeners();
+}
+
+export function getAttendancePolicyConfig(): AttendancePolicyConfig {
+  const defaults: AttendancePolicyConfig = {
+    defaultGeofenceRadiusMeters: DEFAULT_ALLOWED_RADIUS_METERS,
+    defaultGpsAccuracyThresholdMeters: DEFAULT_GPS_ACCURACY_THRESHOLD_METERS,
+    shiftAbsentCutoffMinutes: DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES,
+    overtimeMinimumMinutes: 15,
+    requireCheckInPhoto: false,
+    requireCheckOutPhoto: false,
+    updatedBy: 'System Default',
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    const raw = localStorage.getItem(POLICY_CONFIG_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<AttendancePolicyConfig>;
+    return {
+      defaultGeofenceRadiusMeters: Math.min(
+        5000,
+        Math.max(20, Number(parsed.defaultGeofenceRadiusMeters) || DEFAULT_ALLOWED_RADIUS_METERS)
+      ),
+      defaultGpsAccuracyThresholdMeters: Math.min(
+        1000,
+        Math.max(10, Number(parsed.defaultGpsAccuracyThresholdMeters) || DEFAULT_GPS_ACCURACY_THRESHOLD_METERS)
+      ),
+      shiftAbsentCutoffMinutes: Math.min(
+        720,
+        Math.max(15, Number(parsed.shiftAbsentCutoffMinutes) || DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES)
+      ),
+      overtimeMinimumMinutes: Math.min(
+        240,
+        Math.max(5, Number(parsed.overtimeMinimumMinutes) || 15)
+      ),
+      requireCheckInPhoto: Boolean(parsed.requireCheckInPhoto),
+      requireCheckOutPhoto: Boolean(parsed.requireCheckOutPhoto),
+      updatedBy: parsed.updatedBy || defaults.updatedBy,
+      updatedAt: parsed.updatedAt || defaults.updatedAt,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+export async function saveAttendancePolicyConfig(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  nextConfig: Omit<AttendancePolicyConfig, 'updatedBy' | 'updatedAt'>
+): Promise<AttendancePolicyConfig> {
+  if (caller.role !== 'admin') {
+    throw new Error('Only Administrators can modify global Attendance & Geofence policy defaults.');
+  }
+  const nowIso = new Date().toISOString();
+  const saved: AttendancePolicyConfig = {
+    defaultGeofenceRadiusMeters: Math.min(
+      5000,
+      Math.max(20, Math.round(nextConfig.defaultGeofenceRadiusMeters || DEFAULT_ALLOWED_RADIUS_METERS))
+    ),
+    defaultGpsAccuracyThresholdMeters: Math.min(
+      1000,
+      Math.max(10, Math.round(nextConfig.defaultGpsAccuracyThresholdMeters || DEFAULT_GPS_ACCURACY_THRESHOLD_METERS))
+    ),
+    shiftAbsentCutoffMinutes: Math.min(
+      720,
+      Math.max(15, Math.round(nextConfig.shiftAbsentCutoffMinutes || DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES))
+    ),
+    overtimeMinimumMinutes: Math.min(
+      240,
+      Math.max(5, Math.round(nextConfig.overtimeMinimumMinutes || 15))
+    ),
+    requireCheckInPhoto: Boolean(nextConfig.requireCheckInPhoto),
+    requireCheckOutPhoto: Boolean(nextConfig.requireCheckOutPhoto),
+    updatedBy: `${caller.fullName} (${caller.role})`,
+    updatedAt: nowIso,
+  };
+  try {
+    localStorage.setItem(POLICY_CONFIG_STORAGE_KEY, JSON.stringify(saved));
+  } catch {
+    // Ignore storage quota warnings
+  }
+  await recordExternalMasterAudit(caller, isPreviewSession, {
+    action: 'Global Attendance Policy Updated',
+    module: 'Attendance',
+    recordId: 'GLOBAL-ATTENDANCE-POLICY',
+    branchId: caller.branchId || 'ALL',
+    summary: `Default Radius: ${saved.defaultGeofenceRadiusMeters}m, Cut-Off: +${saved.shiftAbsentCutoffMinutes}m, OT Min: ${saved.overtimeMinimumMinutes}m, Photo In/Out: ${saved.requireCheckInPhoto}/${saved.requireCheckOutPhoto}`,
+  });
+  notifyAttendanceListeners();
+  return saved;
+}
+
+// ============================================================================
+// OFFLINE ATTENDANCE QUEUE (IDEMPOTENT RETRY, NEVER PAYROLL-FINALIZED UNTIL SYNCED & HR-VERIFIED)
+// ============================================================================
+export function listOfflineAttendanceQueue(employeeUid?: string): OfflineAttendanceQueueItem[] {
+  try {
+    const raw = localStorage.getItem(OFFLINE_QUEUE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as OfflineAttendanceQueueItem[];
+    if (!Array.isArray(parsed)) return [];
+    return employeeUid ? parsed.filter((i) => i.employeeUid === employeeUid) : parsed;
+  } catch {
+    return [];
+  }
+}
+
+function writeOfflineAttendanceQueue(items: OfflineAttendanceQueueItem[]): void {
+  try {
+    localStorage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // Ignore storage quota warnings
+  }
+  notifyAttendanceListeners();
+}
+
+export function enqueueOfflineAttendancePunch(
+  caller: RexonUser,
+  params: {
+    action: 'check_in' | 'check_out';
+    siteId: string;
+    siteName: string;
+    attendanceDate: string;
+    checkInPayload?: EmployeeCheckInInput;
+    checkOutPayload?: EmployeeCheckOutInput;
+    errorMessage?: string;
+  }
+): OfflineAttendanceQueueItem {
+  const existing = listOfflineAttendanceQueue();
+  const idempotencyKey = `${caller.uid}_${params.siteId}_${params.attendanceDate}_${params.action}`;
+  const alreadyQueued = existing.find((q) => q.idempotencyKey === idempotencyKey);
+  if (alreadyQueued) {
+    return alreadyQueued;
+  }
+  const item: OfflineAttendanceQueueItem = {
+    queueId: `OFQ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+    idempotencyKey,
+    action: params.action,
+    employeeUid: caller.uid,
+    employeeName: caller.fullName,
+    siteId: params.siteId,
+    siteName: params.siteName,
+    attendanceDate: params.attendanceDate,
+    capturedAt: new Date().toISOString(),
+    checkInPayload: params.checkInPayload
+      ? { ...params.checkInPayload, idempotencyKey }
+      : undefined,
+    checkOutPayload: params.checkOutPayload
+      ? { ...params.checkOutPayload, idempotencyKey }
+      : undefined,
+    retryCount: 0,
+    lastError: params.errorMessage || 'Queued while device was offline (Pending Sync)',
+  };
+  writeOfflineAttendanceQueue([item, ...existing]);
+  return item;
+}
+
+export function removeOfflineAttendanceQueueItem(queueId: string): void {
+  const existing = listOfflineAttendanceQueue();
+  writeOfflineAttendanceQueue(existing.filter((i) => i.queueId !== queueId));
+}
+
+export async function syncOfflineAttendanceQueue(
+  caller: RexonUser,
+  isPreviewSession: boolean
+): Promise<{ syncedCount: number; failedCount: number }> {
+  if (caller.role !== 'employee') return { syncedCount: 0, failedCount: 0 };
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { syncedCount: 0, failedCount: listOfflineAttendanceQueue(caller.uid).length };
+  }
+
+  const allItems = listOfflineAttendanceQueue();
+  const mine = allItems.filter((i) => i.employeeUid === caller.uid);
+  const others = allItems.filter((i) => i.employeeUid !== caller.uid);
+  if (mine.length === 0) return { syncedCount: 0, failedCount: 0 };
+
+  let syncedCount = 0;
+  const remainingMine: OfflineAttendanceQueueItem[] = [];
+
+  for (const item of mine) {
+    try {
+      if (item.action === 'check_in' && item.checkInPayload) {
+        await submitEmployeeCheckIn(
+          caller,
+          isPreviewSession,
+          item.checkInPayload,
+          item.capturedAt
+        );
+      } else if (item.action === 'check_out' && item.checkOutPayload) {
+        await submitEmployeeCheckOut(
+          caller,
+          isPreviewSession,
+          item.checkOutPayload,
+          item.capturedAt
+        );
+      }
+      syncedCount += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Sync retry failed';
+      // If duplicate check-in/out already succeeded earlier, clear from queue safely
+      if (msg.includes('Duplicate Check-In') || msg.includes('Duplicate Check-Out')) {
+        syncedCount += 1;
+      } else {
+        remainingMine.push({
+          ...item,
+          retryCount: (item.retryCount || 0) + 1,
+          lastError: msg,
+        });
+      }
+    }
+  }
+
+  writeOfflineAttendanceQueue([...remainingMine, ...others]);
+  return { syncedCount, failedCount: remainingMine.length };
+}
+
+// ============================================================================
+// PHOTO VERIFICATION UPLOAD HELPER (PRIVATE STORAGE + FAST CLIENT COMPRESSION)
+// ============================================================================
+export async function uploadAttendanceVerificationPhoto(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  file: File,
+  params: {
+    branchId: string;
+    employeeId: string;
+    siteId: string;
+    attendanceId?: string;
+    photoType: 'check_in' | 'check_out' | 'field_report';
+    cameraFacing: 'user' | 'environment';
+  }
+): Promise<AttendancePhotoMetadata> {
+  const safeEmp = (params.employeeId || caller.uid).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeSite = (params.siteId || 'SITE').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeBranch = (params.branchId || caller.branchId || 'HQ').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const ts = Date.now();
+
+  const storagePath =
+    params.photoType === 'field_report'
+      ? `site_inspections/${safeSite}/VST-${ts}/${ts}_report.jpg`
+      : `attendance_photos/${safeBranch}/${safeEmp}/${ts}_${params.photoType}.jpg`;
+
+  const processedUrl = await processInstantPhotoAsset(file, {
+    storagePath,
+    tryCloudStorage: useLiveFirestore(isPreviewSession),
+    maxDimension: 360,
+  });
+
+  return {
+    storagePath,
+    previewUrl: processedUrl,
+    employeeId: params.employeeId || caller.uid,
+    attendanceId: params.attendanceId || 'PENDING',
+    captureTime: new Date(ts).toISOString(),
+    photoType: params.photoType,
+    cameraFacing: params.cameraFacing,
+    uploadedBy: caller.uid,
+  };
+}
+
+// ============================================================================
+// APPROVED LEAVE LOOKUP HELPER (BLOCKS ROSTER CONFLICTS ON APPROVED LEAVE DATES)
+// ============================================================================
+interface ApprovedLeaveWindow {
+  requestId: string;
+  employeeUid: string;
+  employeeId?: string;
+  leaveType: string;
+  startDate: string;
+  endDate: string;
+  reason: string;
+}
+
+async function listApprovedLeavesForBranchOrEmployee(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  branchId?: string
+): Promise<ApprovedLeaveWindow[]> {
+  if (!useLiveFirestore(isPreviewSession)) {
+    return [];
+  }
+  try {
+    let q;
+    if (caller.role === 'employee') {
+      q = query(
+        collection(firestoreDb!, 'leaveRequests'),
+        where('employeeUid', '==', caller.uid)
+      );
+    } else if (branchId) {
+      q = query(
+        collection(firestoreDb!, 'leaveRequests'),
+        where('branchId', '==', branchId)
+      );
+    } else if (caller.role === 'admin') {
+      q = query(collection(firestoreDb!, 'leaveRequests'));
+    } else {
+      return [];
+    }
+    const snap = await getDocs(q);
+    return snap.docs
+      .map(
+        (d): Record<string, unknown> => ({
+          requestId: d.id,
+          ...(d.data() as Record<string, unknown>),
+        })
+      )
+      .filter((raw) => {
+        const st = String(raw.status || '').toLowerCase();
+        return st === 'approved';
+      })
+      .map((raw) => ({
+        requestId: String(raw.requestId || ''),
+        employeeUid: String(raw.employeeUid || ''),
+        employeeId: raw.employeeId ? String(raw.employeeId) : undefined,
+        leaveType: String(raw.leaveType || 'Approved Leave'),
+        startDate: String(raw.startDate || raw.fromDate || ''),
+        endDate: String(raw.endDate || raw.toDate || raw.startDate || ''),
+        reason: String(raw.reason || ''),
+      }))
+      .filter((l) => isValidIsoDate(l.startDate));
+  } catch {
+    return [];
+  }
+}
+
+// ============================================================================
+// SHIFT MASTER MANAGEMENT (`shifts` COLLECTION)
+// ============================================================================
+export async function listShiftMasters(
+  caller: RexonUser,
+  isPreviewSession: boolean
+): Promise<ShiftMasterRecord[]> {
+  assertNotSitePortal(caller);
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    return [...store.shifts].sort((a, b) => a.startTime.localeCompare(b.startTime));
+  }
+
+  try {
+    const snap = await getDocs(query(collection(firestoreDb!, 'shifts')));
+    const docs = snap.docs.map((d) => d.data() as ShiftMasterRecord);
+    if (docs.length === 0) {
+      return buildDefaultShiftMasters();
+    }
+    return docs.sort((a, b) => a.startTime.localeCompare(b.startTime));
+  } catch {
+    return buildDefaultShiftMasters();
+  }
+}
+
+export async function upsertShiftMaster(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  input: UpsertShiftMasterInput
+): Promise<ShiftMasterRecord> {
+  assertNotSitePortal(caller);
+  if (caller.role !== 'admin') {
+    if (caller.role !== 'hr' || !hasUserPermission(caller, 'roster.create')) {
+      throw new Error('Managing Shift Definitions requires Admin access or roster.create permission.');
+    }
+  }
+
+  const shiftName = sanitizeInput(input.shiftName, 80);
+  const shiftCode = sanitizeInput(input.shiftCode, 24).toUpperCase();
+  if (shiftName.length < 2 || shiftCode.length < 2) {
+    throw new Error('Enter a valid Shift Name and Shift Code (at least 2 characters).');
+  }
+  if (!isValidTime24h(input.startTime) || !isValidTime24h(input.endTime) || !isValidTime24h(input.reportingTime)) {
+    throw new Error('Enter valid 24-hour Start, End, and Reporting times (HH:MM).');
+  }
+
+  const metrics = computeRosterShiftMetrics(
+    '2026-01-01',
+    input.startTime,
+    input.endTime,
+    input.breakDurationMinutes
+  );
+  if (metrics.grossDurationMinutes < 60 || metrics.grossDurationMinutes > 960) {
+    throw new Error('Shift duration must be between 1 hour and 16 hours.');
+  }
+
+  const existingList = await listShiftMasters(caller, isPreviewSession);
+  const nowIso = new Date().toISOString();
+  const existing = input.shiftId
+    ? existingList.find((s) => s.shiftId === input.shiftId) ?? null
+    : null;
+
+  const shiftId =
+    existing?.shiftId ||
+    generateSequentialId(
+      'SHF',
+      existingList.map((s) => s.shiftId)
+    );
+
+  const record: ShiftMasterRecord = {
+    shiftId,
+    shiftName,
+    shiftCode,
+    shiftType: input.shiftType,
+    startTime: input.startTime,
+    endTime: input.endTime,
+    reportingTime: input.reportingTime,
+    gracePeriodMinutes: Math.max(0, Math.min(120, Math.round(input.gracePeriodMinutes || 0))),
+    breakDurationMinutes: Math.max(0, Math.min(180, Math.round(input.breakDurationMinutes || 0))),
+    weeklyOffDay: sanitizeInput(input.weeklyOffDay || 'Rotational', 32),
+    crossesMidnight: metrics.crossesMidnight,
+    overtimeEligible: Boolean(input.overtimeEligible),
+    cutoffMinutesAfterEnd: Math.max(
+      15,
+      Math.min(720, Math.round(input.cutoffMinutesAfterEnd ?? DEFAULT_SHIFT_ABSENT_CUTOFF_MINUTES))
+    ),
+    status: input.status,
+    createdBy: existing?.createdBy || caller.uid,
+    updatedBy: caller.uid,
+    createdAt: existing?.createdAt || nowIso,
+    updatedAt: nowIso,
+  };
+
+  const auditEntry = buildAttendanceAuditEntry(caller, {
+    category: 'Shift',
+    targetId: shiftId,
+    branchId: caller.branchId || 'ALL',
+    action: existing ? 'Shift Master Updated' : 'Shift Master Created',
+    previousValueSummary: existing ? `${existing.shiftName} (${existing.startTime}–${existing.endTime})` : '—',
+    newValueSummary: `${record.shiftName} [${record.shiftCode}] (${record.startTime}–${record.endTime}${record.crossesMidnight ? ' +1d' : ''}) · ${record.status}`,
+    timestamp: nowIso,
+  });
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    const existsIdx = store.shifts.findIndex((s) => s.shiftId === shiftId);
+    if (existsIdx >= 0) {
+      store.shifts[existsIdx] = record;
+    } else {
+      store.shifts.push(record);
+    }
+    store.attendanceAuditLogs.unshift(auditEntry);
+    writeLocalAttendanceStore(store);
+    return record;
+  }
+
+  const path = `shifts/${shiftId}`;
+  try {
+    const batch = writeBatch(firestoreDb!);
+    batch.set(doc(firestoreDb!, 'shifts', shiftId), {
+      ...record,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    batch.set(doc(firestoreDb!, 'attendanceAuditLogs', auditEntry.auditId), {
+      ...auditEntry,
+      createdAt: serverTimestamp(),
+    });
+    await batch.commit();
+    notifyAttendanceListeners();
+    return record;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
 }
 
 function generateSequentialId(prefix: string, existingIds: string[]): string {
@@ -827,33 +1425,41 @@ export async function createDutyRosterEntries(
     throw new Error('No valid duty dates remain in the selected schedule range.');
   }
 
-  const [branches, clients, sites, services, designations, employee, allAssignments, siteServiceConfigs, existingRosters] =
-    await Promise.all([
-      listBranches(caller, isPreviewSession),
-      listClients(caller, isPreviewSession),
-      listSites(caller, isPreviewSession),
-      listServices(caller, isPreviewSession),
-      listDesignations(caller, isPreviewSession),
-      getEmployeeById(caller, isPreviewSession, input.employeeId),
-      listEmployeeAssignments(caller, isPreviewSession),
-      listSiteServiceConfigs(caller, isPreviewSession, input.siteId),
-      listDutyRosters(caller, isPreviewSession),
-    ]);
-
-  if (!employee) {
-    throw new Error(`Employee ${input.employeeId} not found.`);
-  }
-
-  // 1. Validate Active Employee + Designation + Qualification/Training/License
-  const eligibility = validateEmployeeEligibilityForAssignment(
-    employee,
-    input.designationId,
-    input.serviceCategory,
-    input.serviceId
+  const targetEmployeeIds = Array.from(
+    new Set(
+      (input.employeeIds && input.employeeIds.length > 0
+        ? input.employeeIds
+        : [input.employeeId]
+      ).filter(Boolean)
+    )
   );
-  if (!eligibility.valid) {
-    throw new Error(eligibility.error ?? 'Employee is ineligible for the selected duty.');
+  if (targetEmployeeIds.length === 0) {
+    throw new Error('Select at least one assigned employee to schedule.');
   }
+
+  const [
+    branches,
+    clients,
+    sites,
+    services,
+    designations,
+    allEmployees,
+    allAssignments,
+    siteServiceConfigs,
+    existingRosters,
+    approvedLeaves,
+  ] = await Promise.all([
+    listBranches(caller, isPreviewSession),
+    listClients(caller, isPreviewSession),
+    listSites(caller, isPreviewSession),
+    listServices(caller, isPreviewSession),
+    listDesignations(caller, isPreviewSession),
+    listEmployees(caller, isPreviewSession),
+    listEmployeeAssignments(caller, isPreviewSession),
+    listSiteServiceConfigs(caller, isPreviewSession, input.siteId),
+    listDutyRosters(caller, isPreviewSession),
+    listApprovedLeavesForBranchOrEmployee(caller, isPreviewSession, input.branchId),
+  ]);
 
   const branch = branches.find((b) => b.branchId === input.branchId && !b.isDeleted);
   if (!branch) throw new Error('Selected Branch is missing or inactive.');
@@ -875,7 +1481,6 @@ export async function createDutyRosterEntries(
   );
   if (!designation) throw new Error('Selected Designation is missing or inactive.');
 
-  // Match sanctioned site service configuration for capacity validation
   const matchedSiteService =
     siteServiceConfigs.find(
       (cfg) =>
@@ -884,22 +1489,6 @@ export async function createDutyRosterEntries(
           ? cfg.siteServiceId === input.siteServiceId
           : cfg.designationId === input.designationId && cfg.serviceId === input.serviceId)
     ) ?? null;
-
-  const empAssignmentsForSite = allAssignments.filter(
-    (a) =>
-      a.employeeId === employee.employeeId &&
-      a.siteId === site.siteId &&
-      a.designationId === designation.designationId &&
-      a.assignmentStatus !== 'Cancelled' &&
-      a.assignmentStatus !== 'Transferred' &&
-      a.assignmentStatus !== 'Completed'
-  );
-
-  if (empAssignmentsForSite.length === 0) {
-    throw new Error(
-      `Employee ${employee.fullName} (${employee.employeeId}) does not hold an active/upcoming Site Assignment for "${site.siteName}" as "${designation.designationName}". Assign the employee in Site Assignments first.`
-    );
-  }
 
   const nowIso = new Date().toISOString();
   const batchCode = `BCH-${new Date().getFullYear()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
@@ -912,149 +1501,201 @@ export async function createDutyRosterEntries(
   const createdRecords: DutyRosterRecord[] = [];
   const notificationsToSend: EmployeeNotificationRecord[] = [];
 
-  for (const targetDate of targetDates) {
-    // 2. Verify assignment covers targetDate
-    const validAssignmentOnDate: EmployeeAssignmentRecord | undefined = empAssignmentsForSite.find(
-      (a) => {
-        const end = a.endDate?.trim() || '9999-12-31';
-        return a.startDate <= targetDate && targetDate <= end;
-      }
+  for (const empId of targetEmployeeIds) {
+    const employee =
+      allEmployees.find((e) => e.employeeId === empId) ??
+      (await getEmployeeById(caller, isPreviewSession, empId));
+
+    if (!employee) {
+      throw new Error(`Employee ${empId} not found.`);
+    }
+
+    const eligibility = validateEmployeeEligibilityForAssignment(
+      employee,
+      input.designationId,
+      input.serviceCategory,
+      input.serviceId
+    );
+    if (!eligibility.valid) {
+      throw new Error(`${employee.fullName}: ${eligibility.error ?? 'Ineligible for selected duty.'}`);
+    }
+
+    const empAssignmentsForSite = allAssignments.filter(
+      (a) =>
+        a.employeeId === employee.employeeId &&
+        a.siteId === site.siteId &&
+        a.designationId === designation.designationId &&
+        a.assignmentStatus !== 'Cancelled' &&
+        a.assignmentStatus !== 'Transferred' &&
+        a.assignmentStatus !== 'Completed'
     );
 
-    if (!validAssignmentOnDate) {
+    if (empAssignmentsForSite.length === 0) {
       throw new Error(
-        `Employee ${employee.fullName} does not have a valid site assignment covering ${targetDate} at "${site.siteName}".`
+        `Employee ${employee.fullName} (${employee.employeeId}) does not hold an active/upcoming Site Assignment for "${site.siteName}" as "${designation.designationName}". Assign the employee in Site Assignments first.`
       );
     }
 
-    // 3. Detect overlapping shifts (including overnight midnight-crossing spillovers)
-    const conflict = detectDutyRosterConflict(
-      {
+    for (const targetDate of targetDates) {
+      // 1. Approved Leave Conflict Check
+      const conflictingLeave = approvedLeaves.find(
+        (lv) =>
+          ((employee.linkedUid && lv.employeeUid === employee.linkedUid) ||
+            lv.employeeId === employee.employeeId) &&
+          lv.startDate <= targetDate &&
+          targetDate <= (lv.endDate || lv.startDate)
+      );
+      if (conflictingLeave) {
+        throw new Error(
+          `Approved Leave Conflict: ${employee.fullName} has approved leave (${conflictingLeave.leaveType}) from ${conflictingLeave.startDate} to ${conflictingLeave.endDate} covering ${targetDate}.`
+        );
+      }
+
+      // 2. Verify assignment covers targetDate
+      const validAssignmentOnDate: EmployeeAssignmentRecord | undefined = empAssignmentsForSite.find(
+        (a) => {
+          const end = a.endDate?.trim() || '9999-12-31';
+          return a.startDate <= targetDate && targetDate <= end;
+        }
+      );
+
+      if (!validAssignmentOnDate) {
+        throw new Error(
+          `Employee ${employee.fullName} does not have a valid site assignment covering ${targetDate} at "${site.siteName}".`
+        );
+      }
+
+      // 3. Detect overlapping shifts (including overnight midnight-crossing spillovers)
+      const conflict = detectDutyRosterConflict(
+        {
+          employeeId: employee.employeeId,
+          dutyDate: targetDate,
+          dutyStartTime: input.dutyStartTime,
+          dutyEndTime: input.dutyEndTime,
+        },
+        workingRosterPool
+      );
+      if (conflict.hasConflict) {
+        throw new Error(conflict.reason ?? `Overlapping duty conflict detected on ${targetDate}.`);
+      }
+
+      // 4. Enforce Sanctioned Post Capacity (`siteServices.requiredCount`)
+      if (matchedSiteService) {
+        const samePostCountOnDate = workingRosterPool.filter(
+          (r) =>
+            r.status !== 'Cancelled' &&
+            r.siteId === site.siteId &&
+            r.designationId === designation.designationId &&
+            r.dutyDate === targetDate
+        ).length;
+
+        if (samePostCountOnDate + 1 > matchedSiteService.requiredCount) {
+          const canAuthorizeException =
+            Boolean(input.authorizedCapacityException) &&
+            (caller.role === 'admin' || hasUserPermission(caller, 'attendance.approve'));
+
+          if (!canAuthorizeException) {
+            throw new Error(
+              `Sanctioned post capacity exceeded on ${targetDate} for "${designation.designationName}" at "${site.siteName}" (${samePostCountOnDate}/${matchedSiteService.requiredCount} scheduled). Authorized exception requires Admin or attendance.approve permission.`
+            );
+          }
+          if (!input.capacityExceptionReason || input.capacityExceptionReason.trim().length < 6) {
+            throw new Error(
+              'Provide a Capacity Exception Reason (at least 6 characters) to exceed sanctioned post count.'
+            );
+          }
+        }
+      }
+
+      const shiftMeta = computeRosterShiftMetrics(
+        targetDate,
+        input.dutyStartTime,
+        input.dutyEndTime,
+        input.breakDurationMinutes
+      );
+
+      const nextId = generateSequentialId('RST', allExistingRosterIds);
+      allExistingRosterIds.push(nextId);
+
+      const status = input.publishImmediately ? 'Published' : 'Draft';
+
+      const record: DutyRosterRecord = {
+        rosterId: nextId,
+        scheduleMode: input.scheduleMode,
+        batchCode,
+        branchId: branch.branchId,
+        branchName: branch.branchName,
+        clientId: client.clientId,
+        clientName: client.companyName,
+        siteId: site.siteId,
+        siteName: site.siteName,
+        siteServiceId: matchedSiteService?.siteServiceId || '',
+        serviceCategory: input.serviceCategory,
+        serviceId: service.serviceId,
+        serviceName: service.serviceName,
+        designationId: designation.designationId,
+        designationName: designation.designationName,
         employeeId: employee.employeeId,
+        employeeName: employee.fullName,
+        linkedUid: employee.linkedUid || '',
+        assignmentId: validAssignmentOnDate.assignmentId,
         dutyDate: targetDate,
+        dutyEndDate: shiftMeta.dutyEndDate,
+        shiftId: input.shiftId || '',
+        shiftType: input.shiftType,
         dutyStartTime: input.dutyStartTime,
         dutyEndTime: input.dutyEndTime,
-      },
-      workingRosterPool
-    );
-    if (conflict.hasConflict) {
-      throw new Error(conflict.reason ?? `Overlapping duty conflict detected on ${targetDate}.`);
-    }
+        crossesMidnight: shiftMeta.crossesMidnight,
+        breakDurationMinutes: Math.round(input.breakDurationMinutes || 0),
+        grossDurationMinutes: shiftMeta.grossDurationMinutes,
+        netScheduledMinutes: shiftMeta.netScheduledMinutes,
+        reportingTime: input.reportingTime,
+        gracePeriodMinutes: Math.round(input.gracePeriodMinutes || 0),
+        weeklyOffDay: sanitizeInput(input.weeklyOffDay || validAssignmentOnDate.weeklyOff || '', 32),
+        assignedFieldOfficerUid: sanitizeInput(input.assignedFieldOfficerUid || '', 128),
+        assignedFieldOfficerName: sanitizeInput(input.assignedFieldOfficerName || '', 120),
+        dutyInstructions: sanitizeInput(input.dutyInstructions || '', 350),
+        status,
+        authorizedCapacityException: Boolean(input.authorizedCapacityException),
+        capacityExceptionReason: sanitizeInput(input.capacityExceptionReason || '', 250),
+        publishedAt: input.publishImmediately ? nowIso : null,
+        publishedBy: input.publishImmediately ? `${caller.fullName} (${caller.role})` : null,
+        createdBy: caller.uid,
+        updatedBy: caller.uid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
 
-    // 4. Enforce Sanctioned Post Capacity (`siteServices.requiredCount`)
-    if (matchedSiteService) {
-      const samePostCountOnDate = workingRosterPool.filter(
-        (r) =>
-          r.status !== 'Cancelled' &&
-          r.siteId === site.siteId &&
-          r.designationId === designation.designationId &&
-          r.dutyDate === targetDate
-      ).length;
+      createdRecords.push(record);
+      workingRosterPool.push(record);
 
-      if (samePostCountOnDate + 1 > matchedSiteService.requiredCount) {
-        const canAuthorizeException =
-          Boolean(input.authorizedCapacityException) &&
-          (caller.role === 'admin' || hasUserPermission(caller, 'attendance.approve'));
-
-        if (!canAuthorizeException) {
-          throw new Error(
-            `Sanctioned post capacity exceeded on ${targetDate} for "${designation.designationName}" at "${site.siteName}" (${samePostCountOnDate}/${matchedSiteService.requiredCount} scheduled). Authorized exception requires Admin or attendance.approve permission.`
-          );
-        }
-        if (!input.capacityExceptionReason || input.capacityExceptionReason.trim().length < 6) {
-          throw new Error(
-            'Provide a Capacity Exception Reason (at least 6 characters) to exceed sanctioned post count.'
-          );
-        }
+      if (input.publishImmediately) {
+        notificationsToSend.push(
+          buildEmployeeNotificationEntry({
+            employeeId: employee.employeeId,
+            linkedUid: employee.linkedUid || '',
+            branchId: branch.branchId,
+            siteId: site.siteId,
+            siteName: site.siteName,
+            category: 'Roster Published',
+            title: `Duty Roster Published — ${targetDate}`,
+            message: `${record.shiftType} (${record.dutyStartTime}–${record.dutyEndTime}${record.crossesMidnight ? ' next day' : ''}) at ${site.siteName} as ${designation.designationName}. Report at ${record.reportingTime}.`,
+            dutyDate: targetDate,
+            createdAt: nowIso,
+          })
+        );
       }
-    }
-
-    const shiftMeta = computeRosterShiftMetrics(
-      targetDate,
-      input.dutyStartTime,
-      input.dutyEndTime,
-      input.breakDurationMinutes
-    );
-
-    const nextId = generateSequentialId('RST', allExistingRosterIds);
-    allExistingRosterIds.push(nextId);
-
-    const status = input.publishImmediately ? 'Published' : 'Draft';
-
-    const record: DutyRosterRecord = {
-      rosterId: nextId,
-      scheduleMode: input.scheduleMode,
-      batchCode,
-      branchId: branch.branchId,
-      branchName: branch.branchName,
-      clientId: client.clientId,
-      clientName: client.companyName,
-      siteId: site.siteId,
-      siteName: site.siteName,
-      siteServiceId: matchedSiteService?.siteServiceId || '',
-      serviceCategory: input.serviceCategory,
-      serviceId: service.serviceId,
-      serviceName: service.serviceName,
-      designationId: designation.designationId,
-      designationName: designation.designationName,
-      employeeId: employee.employeeId,
-      employeeName: employee.fullName,
-      linkedUid: employee.linkedUid || '',
-      assignmentId: validAssignmentOnDate.assignmentId,
-      dutyDate: targetDate,
-      dutyEndDate: shiftMeta.dutyEndDate,
-      shiftType: input.shiftType,
-      dutyStartTime: input.dutyStartTime,
-      dutyEndTime: input.dutyEndTime,
-      crossesMidnight: shiftMeta.crossesMidnight,
-      breakDurationMinutes: Math.round(input.breakDurationMinutes || 0),
-      grossDurationMinutes: shiftMeta.grossDurationMinutes,
-      netScheduledMinutes: shiftMeta.netScheduledMinutes,
-      reportingTime: input.reportingTime,
-      gracePeriodMinutes: Math.round(input.gracePeriodMinutes || 0),
-      assignedFieldOfficerUid: sanitizeInput(input.assignedFieldOfficerUid || '', 128),
-      assignedFieldOfficerName: sanitizeInput(input.assignedFieldOfficerName || '', 120),
-      dutyInstructions: sanitizeInput(input.dutyInstructions || '', 350),
-      status,
-      authorizedCapacityException: Boolean(input.authorizedCapacityException),
-      capacityExceptionReason: sanitizeInput(input.capacityExceptionReason || '', 250),
-      publishedAt: input.publishImmediately ? nowIso : null,
-      publishedBy: input.publishImmediately ? `${caller.fullName} (${caller.role})` : null,
-      createdBy: caller.uid,
-      updatedBy: caller.uid,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-
-    createdRecords.push(record);
-    workingRosterPool.push(record);
-
-    if (input.publishImmediately) {
-      notificationsToSend.push(
-        buildEmployeeNotificationEntry({
-          employeeId: employee.employeeId,
-          linkedUid: employee.linkedUid || '',
-          branchId: branch.branchId,
-          siteId: site.siteId,
-          siteName: site.siteName,
-          category: 'Roster Published',
-          title: `Duty Roster Published — ${targetDate}`,
-          message: `${record.shiftType} (${record.dutyStartTime}–${record.dutyEndTime}${record.crossesMidnight ? ' next day' : ''}) at ${site.siteName} as ${designation.designationName}. Report at ${record.reportingTime}.`,
-          dutyDate: targetDate,
-          createdAt: nowIso,
-        })
-      );
     }
   }
 
   const auditRecord = buildAttendanceAuditEntry(caller, {
     category: 'Roster',
     targetId: createdRecords[0].rosterId,
-    employeeId: employee.employeeId,
+    employeeId: targetEmployeeIds.length === 1 ? targetEmployeeIds[0] : 'BULK',
     siteId: site.siteId,
     branchId: branch.branchId,
     action: input.publishImmediately ? 'Duty Roster Created & Published' : 'Draft Duty Roster Created',
-    newValueSummary: `${createdRecords.length} ${input.scheduleMode} shift(s) for ${employee.fullName} (${employee.employeeId}) at ${site.siteName} [${input.shiftType}: ${input.dutyStartTime}–${input.dutyEndTime}]`,
+    newValueSummary: `${createdRecords.length} ${input.scheduleMode} shift(s) across ${targetEmployeeIds.length} employee(s) at ${site.siteName} [${input.shiftType}: ${input.dutyStartTime}–${input.dutyEndTime}]`,
     reason: input.capacityExceptionReason || '',
     timestamp: nowIso,
   });
@@ -1124,6 +1765,78 @@ export async function createDutyRosterEntries(
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
+}
+
+export async function copyPreviousDayDutyRosters(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  params: {
+    targetDate: string;
+    siteId?: string;
+    branchId?: string;
+    publishImmediately: boolean;
+  }
+): Promise<{ copiedCount: number; skippedCount: number; skippedReasons: string[] }> {
+  assertNotSitePortal(caller);
+  if (!isValidIsoDate(params.targetDate)) {
+    throw new Error('Select a valid Target Duty Date (YYYY-MM-DD) to copy onto.');
+  }
+
+  const sourceDate = addDaysToIsoDate(params.targetDate, -1);
+  const allRosters = await listDutyRosters(caller, isPreviewSession);
+  const sourceRosters = allRosters.filter((r) => {
+    if (r.dutyDate !== sourceDate) return false;
+    if (r.status === 'Cancelled') return false;
+    if (params.siteId && r.siteId !== params.siteId) return false;
+    if (params.branchId && r.branchId !== params.branchId) return false;
+    return true;
+  });
+
+  if (sourceRosters.length === 0) {
+    throw new Error(
+      `No active duty rosters found on previous day (${sourceDate})${params.siteId ? ' for the selected site' : ''} to copy.`
+    );
+  }
+
+  let copiedCount = 0;
+  let skippedCount = 0;
+  const skippedReasons: string[] = [];
+
+  for (const src of sourceRosters) {
+    try {
+      const created = await createDutyRosterEntries(caller, isPreviewSession, {
+        scheduleMode: 'Daily',
+        branchId: src.branchId,
+        clientId: src.clientId,
+        siteId: src.siteId,
+        siteServiceId: src.siteServiceId || undefined,
+        serviceCategory: src.serviceCategory,
+        serviceId: src.serviceId,
+        designationId: src.designationId,
+        employeeId: src.employeeId,
+        dutyDate: params.targetDate,
+        shiftId: src.shiftId,
+        shiftType: src.shiftType,
+        dutyStartTime: src.dutyStartTime,
+        dutyEndTime: src.dutyEndTime,
+        breakDurationMinutes: src.breakDurationMinutes,
+        reportingTime: src.reportingTime,
+        gracePeriodMinutes: src.gracePeriodMinutes,
+        weeklyOffDay: src.weeklyOffDay,
+        assignedFieldOfficerUid: src.assignedFieldOfficerUid,
+        assignedFieldOfficerName: src.assignedFieldOfficerName,
+        dutyInstructions: src.dutyInstructions,
+        publishImmediately: params.publishImmediately,
+      });
+      copiedCount += created.length;
+    } catch (err) {
+      skippedCount += 1;
+      const reason = err instanceof Error ? err.message : 'Skipped due to conflict';
+      skippedReasons.push(`${src.employeeName}: ${reason}`);
+    }
+  }
+
+  return { copiedCount, skippedCount, skippedReasons };
 }
 
 export async function updateDutyRosterEntry(
@@ -1934,13 +2647,16 @@ export async function getEmployeeTodayDutyContext(
   const today = targetDate && isValidIsoDate(targetDate) ? targetDate : getTodayIsoDate();
   const yesterday = addDaysToIsoDate(today, -1);
 
-  const [emp, rosters, assignments, myAttendance, notifications] = await Promise.all([
+  const [emp, rosters, assignments, myAttendance, notifications, approvedLeaves] = await Promise.all([
     getOwnEmployeeRecord(caller, isPreviewSession),
     listDutyRosters(caller, isPreviewSession),
     listEmployeeAssignments(caller, isPreviewSession),
     listAttendanceRecords(caller, isPreviewSession),
     listEmployeeNotifications(caller, isPreviewSession),
+    listApprovedLeavesForBranchOrEmployee(caller, isPreviewSession),
   ]);
+
+  const policy = getAttendancePolicyConfig();
 
   if (!emp) {
     return {
@@ -1948,11 +2664,18 @@ export async function getEmployeeTodayDutyContext(
       activeRoster: null,
       fallbackAssignment: null,
       siteGeoConfig: null,
+      approvedLeaveToday: null,
+      isPhotoRequired: policy.requireCheckInPhoto,
       todayAttendance: null,
       openOvernightAttendance: null,
       unreadNotificationsCount: notifications.filter((n) => !n.isRead).length,
     };
   }
+
+  const approvedLeaveToday =
+    approvedLeaves.find(
+      (lv) => lv.startDate <= today && today <= (lv.endDate || lv.startDate)
+    ) ?? null;
 
   // Check if employee has an open overnight attendance shift started yesterday
   const openOvernightAttendance =
@@ -1980,10 +2703,12 @@ export async function getEmployeeTodayDutyContext(
   if (resolvedSiteId) {
     const site = await getSiteByIdForAttendance(resolvedSiteId, isPreviewSession);
     if (site) {
-      const geo = resolveSiteGeoSettings(site);
+      const geo = resolveSiteGeoSettings(site, policy.defaultGeofenceRadiusMeters);
+      const addrParts = [site.fullAddress, site.city, site.state, site.pinCode].filter(Boolean);
       siteGeoConfig = {
         siteId: site.siteId,
         siteName: site.siteName,
+        fullAddress: addrParts.join(', '),
         ...geo,
       };
     }
@@ -2003,6 +2728,7 @@ export async function getEmployeeTodayDutyContext(
       branchId: emp.branchId,
       branchName: emp.branchName,
       employeeStatus: emp.employeeStatus,
+      profilePhoto: emp.profilePhoto || caller.profilePhoto || '',
     },
     activeRoster,
     fallbackAssignment: matchedAssignment
@@ -2029,6 +2755,8 @@ export async function getEmployeeTodayDutyContext(
         }
       : null,
     siteGeoConfig,
+    approvedLeaveToday,
+    isPhotoRequired: policy.requireCheckInPhoto,
     todayAttendance,
     openOvernightAttendance,
     unreadNotificationsCount: notifications.filter((n) => !n.isRead).length,
@@ -2055,6 +2783,11 @@ export async function submitEmployeeCheckIn(
     throw new Error(
       `Check-In blocked: Employee status is "${emp.employeeStatus}". Only Active employees can check in.`
     );
+  }
+
+  const policy = getAttendancePolicyConfig();
+  if (policy.requireCheckInPhoto && !input.photo?.previewUrl) {
+    throw new Error('Capture your Check-In verification photograph before submitting attendance.');
   }
 
   const attendanceDate =
@@ -2108,15 +2841,20 @@ export async function submitEmployeeCheckIn(
   const breakDurationMinutes = matchedRoster ? matchedRoster.breakDurationMinutes : 30;
   const gracePeriodMinutes = matchedRoster ? matchedRoster.gracePeriodMinutes : 15;
 
-  // Duplicate check-in prevention for the same date & shift/roster
+  const idempotencyKey =
+    input.idempotencyKey ||
+    `${caller.uid}_${site.siteId}_${attendanceDate}_${String(resolvedShiftType)}_check_in`;
+
+  // Idempotent / duplicate check-in prevention for the same date & shift/roster
   const duplicate = existingAttendance.find(
     (a) =>
-      a.attendanceDate === attendanceDate &&
-      a.siteId === site.siteId &&
-      (matchedRoster
-        ? a.rosterId === matchedRoster.rosterId
-        : a.shiftType === resolvedShiftType) &&
-      Boolean(a.checkInAt)
+      (input.idempotencyKey && a.idempotencyKey === input.idempotencyKey) ||
+      (a.attendanceDate === attendanceDate &&
+        a.siteId === site.siteId &&
+        (matchedRoster
+          ? a.rosterId === matchedRoster.rosterId
+          : a.shiftType === resolvedShiftType) &&
+        Boolean(a.checkInAt))
   );
   if (duplicate) {
     throw new Error(
@@ -2125,7 +2863,7 @@ export async function submitEmployeeCheckIn(
   }
 
   const nowIso = overrideNowIso || new Date().toISOString();
-  const geoSettings = resolveSiteGeoSettings(site);
+  const geoSettings = resolveSiteGeoSettings(site, policy.defaultGeofenceRadiusMeters);
   const shiftMetrics = computeRosterShiftMetrics(
     attendanceDate,
     scheduledStartTime,
@@ -2135,10 +2873,11 @@ export async function submitEmployeeCheckIn(
 
   let checkInGeo: AttendanceGeoMetadata | null = null;
   let verificationOutcome: AttendanceVerificationOutcome = 'Verified';
+  let locationStatus: AttendanceLocationStatus = 'Within Geofence';
   let qrSessionId = '';
   let qrVerificationStatus = '';
   let isException = false;
-  let cleanExceptionReason = sanitizeInput(input.exceptionReason || '', 300);
+  const cleanExceptionReason = sanitizeInput(input.exceptionReason || '', 300);
 
   if (input.method === 'GPS') {
     const gpsEval = await verifyGpsWithBackendOrDeterministic({
@@ -2151,13 +2890,28 @@ export async function submitEmployeeCheckIn(
       accuracyThresholdMeters: geoSettings.gpsAccuracyThresholdMeters,
     });
 
+    if (gpsEval.verificationOutcome === 'Verified') {
+      locationStatus = 'Within Geofence';
+    } else if (gpsEval.verificationOutcome === 'Outside_Geofence') {
+      locationStatus = 'Outside Geofence';
+    } else if (gpsEval.verificationOutcome === 'Low_GPS_Accuracy') {
+      locationStatus = 'GPS Accuracy Low';
+    } else if (input.gpsLocationStatus === 'GPS Permission Denied') {
+      locationStatus = 'GPS Permission Denied';
+    } else {
+      locationStatus = 'Location Unavailable';
+    }
+
     checkInGeo = {
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
+      siteLatitude: geoSettings.latitude,
+      siteLongitude: geoSettings.longitude,
       accuracyMeters: input.accuracyMeters ?? null,
       distanceMeters: gpsEval.distanceMeters,
       allowedRadiusMeters: geoSettings.allowedRadiusMeters,
       withinGeofence: gpsEval.withinGeofence,
+      locationStatus,
       serverVerified: gpsEval.serverVerified,
       capturedAt: nowIso,
     };
@@ -2170,16 +2924,18 @@ export async function submitEmployeeCheckIn(
           ? `You are ${gpsEval.distanceMeters}m away from "${site.siteName}" (allowed geofence radius: ${geoSettings.allowedRadiusMeters}m).`
           : verificationOutcome === 'Low_GPS_Accuracy'
             ? `GPS signal accuracy (±${Math.round(input.accuracyMeters || 0)}m) exceeds site threshold (±${geoSettings.gpsAccuracyThresholdMeters}m).`
-            : gpsEval.errorMessage || 'GPS coordinates unavailable.';
+            : locationStatus === 'GPS Permission Denied'
+              ? 'Browser GPS location permission was denied.'
+              : gpsEval.errorMessage || 'GPS coordinates unavailable.';
 
       if (!input.submitAsException) {
         throw new Error(
-          `Geofence Check-In Blocked: ${detailMsg} Move inside the authorized boundary or submit a Geofence Exception Request with reason for HR review.`
+          `Geofence Check-In Blocked (${locationStatus}): ${detailMsg} Move inside the authorized boundary or enable Exception Request with reason for HR review.`
         );
       }
       if (cleanExceptionReason.length < 6) {
         throw new Error(
-          'Enter an Exception Reason (minimum 6 characters) to submit an outside-geofence check-in for HR review.'
+          'Enter an Exception Reason (minimum 6 characters) to submit an outside-geofence or GPS-unavailable check-in for HR review.'
         );
       }
       isException = true;
@@ -2202,6 +2958,7 @@ export async function submitEmployeeCheckIn(
     qrSessionId = qrRes.sessionId;
     qrVerificationStatus = 'HMAC_Rotating_QR_Verified';
     verificationOutcome = 'QR_Verified';
+    locationStatus = 'Within Geofence';
   }
 
   const lateCalc = computeCheckInLateMinutes(
@@ -2220,6 +2977,15 @@ export async function submitEmployeeCheckIn(
     : existingAttendance.map((a) => a.attendanceId);
 
   const attendanceId = generateSequentialId('ATT', existingIds);
+
+  const finalizedCheckInPhoto: AttendancePhotoMetadata | null = input.photo
+    ? {
+        ...input.photo,
+        employeeId: emp.employeeId,
+        attendanceId,
+        photoType: 'check_in',
+      }
+    : null;
 
   const record: AttendanceRecord = {
     attendanceId,
@@ -2249,12 +3015,17 @@ export async function submitEmployeeCheckIn(
     breakDurationMinutes,
     gracePeriodMinutes,
     status: initialStatus,
+    verificationStatus: 'Pending',
+    locationStatus,
+    isPayrollEligible: false, // Strictly gated until HR Verification
     checkInAt: nowIso,
     checkOutAt: null,
     checkInMethod: input.method,
     checkOutMethod: null,
     checkInGeo,
     checkOutGeo: null,
+    checkInPhoto: finalizedCheckInPhoto,
+    checkOutPhoto: null,
     qrSessionId,
     qrVerificationStatus,
     deviceMetadata: captureSanitizedDeviceMetadata(),
@@ -2276,6 +3047,8 @@ export async function submitEmployeeCheckIn(
     exceptionReason: cleanExceptionReason,
     hrRemarks: '',
     fieldOfficerRemarks: '',
+    timeCorrectionHistory: [],
+    idempotencyKey,
     createdBy: caller.uid,
     updatedBy: caller.uid,
     createdAt: nowIso,
@@ -2302,9 +3075,10 @@ export async function submitEmployeeCheckIn(
         requestedCheckOutAt: '',
         requestedCheckOutNextDay: false,
         reason: cleanExceptionReason,
-        supportingLocationNote: checkInGeo?.distanceMeters != null
-          ? `Recorded ${checkInGeo.distanceMeters}m from site center (allowed ${checkInGeo.allowedRadiusMeters}m)`
-          : 'GPS exception submitted on Check-In',
+        supportingLocationNote:
+          checkInGeo?.distanceMeters != null
+            ? `${locationStatus}: Recorded ${checkInGeo.distanceMeters}m from site center (allowed ${checkInGeo.allowedRadiusMeters}m)`
+            : `${locationStatus} submitted on Check-In`,
         status: 'Pending',
         requestedByUid: caller.uid,
         requestedByName: emp.fullName,
@@ -2324,8 +3098,8 @@ export async function submitEmployeeCheckIn(
     employeeId: emp.employeeId,
     siteId: site.siteId,
     branchId: record.branchId,
-    action: isException ? 'Exception Check-In Recorded' : `Employee Check-In (${input.method})`,
-    newValueSummary: `Status: ${record.status}, Method: ${input.method}, Outcome: ${verificationOutcome}, Late: ${record.lateArrivalMinutes}m`,
+    action: isException ? `Exception Check-In (${locationStatus})` : `Employee Check-In (${input.method})`,
+    newValueSummary: `Status: ${record.status}, Location: ${locationStatus}, Photo: ${finalizedCheckInPhoto ? 'Attached' : 'None'}, Late: ${record.lateArrivalMinutes}m`,
     reason: cleanExceptionReason,
     timestamp: nowIso,
   });
@@ -2392,6 +3166,11 @@ export async function submitEmployeeCheckOut(
     throw new Error('Only Employee Portal accounts can perform personal shift Check-Out.');
   }
 
+  const policy = getAttendancePolicyConfig();
+  if (policy.requireCheckOutPhoto && !input.photo?.previewUrl) {
+    throw new Error('Capture your Check-Out verification photograph before submitting.');
+  }
+
   const myRecords = await listAttendanceRecords(caller, isPreviewSession);
   const existing = myRecords.find((a) => a.attendanceId === input.attendanceId);
   if (!existing) {
@@ -2413,10 +3192,12 @@ export async function submitEmployeeCheckOut(
   if (!site) throw new Error('Assigned site record not found.');
 
   const nowIso = overrideNowIso || new Date().toISOString();
-  const geoSettings = resolveSiteGeoSettings(site);
+  const geoSettings = resolveSiteGeoSettings(site, policy.defaultGeofenceRadiusMeters);
 
   let checkOutGeo: AttendanceGeoMetadata | null = null;
   let nextVerificationOutcome = existing.verificationOutcome;
+  let nextLocationStatus: AttendanceLocationStatus =
+    existing.locationStatus || deriveAttendanceLocationStatus(existing);
   let preserveException = existing.status === 'Exception';
   let appendedExceptionReason = existing.exceptionReason;
 
@@ -2431,13 +3212,27 @@ export async function submitEmployeeCheckOut(
       accuracyThresholdMeters: geoSettings.gpsAccuracyThresholdMeters,
     });
 
+    const outLocationStatus: AttendanceLocationStatus =
+      gpsEval.verificationOutcome === 'Verified'
+        ? 'Within Geofence'
+        : gpsEval.verificationOutcome === 'Outside_Geofence'
+          ? 'Outside Geofence'
+          : gpsEval.verificationOutcome === 'Low_GPS_Accuracy'
+            ? 'GPS Accuracy Low'
+            : input.gpsLocationStatus === 'GPS Permission Denied'
+              ? 'GPS Permission Denied'
+              : 'Location Unavailable';
+
     checkOutGeo = {
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
+      siteLatitude: geoSettings.latitude,
+      siteLongitude: geoSettings.longitude,
       accuracyMeters: input.accuracyMeters ?? null,
       distanceMeters: gpsEval.distanceMeters,
       allowedRadiusMeters: geoSettings.allowedRadiusMeters,
       withinGeofence: gpsEval.withinGeofence,
+      locationStatus: outLocationStatus,
       serverVerified: gpsEval.serverVerified,
       capturedAt: nowIso,
     };
@@ -2447,13 +3242,14 @@ export async function submitEmployeeCheckOut(
         const msg =
           gpsEval.verificationOutcome === 'Outside_Geofence'
             ? `You are ${gpsEval.distanceMeters}m from "${site.siteName}" (allowed ${geoSettings.allowedRadiusMeters}m).`
-            : 'GPS signal accuracy is outside threshold.';
+            : `${outLocationStatus}.`;
         throw new Error(
-          `Geofence Check-Out Blocked: ${msg} Move inside the site boundary or provide an Exception Reason for HR verification.`
+          `Geofence Check-Out Blocked (${outLocationStatus}): ${msg} Move inside the site boundary or provide an Exception Reason for HR verification.`
         );
       }
       preserveException = true;
       nextVerificationOutcome = gpsEval.verificationOutcome;
+      nextLocationStatus = outLocationStatus;
       appendedExceptionReason = sanitizeInput(
         existing.exceptionReason
           ? `${existing.exceptionReason} | Out: ${input.exceptionReason}`
@@ -2486,20 +3282,34 @@ export async function submitEmployeeCheckOut(
     checkInIso: existing.checkInAt,
     checkOutIso: nowIso,
     preserveExceptionStatus: preserveException,
+    overtimeMinimumMinutes: policy.overtimeMinimumMinutes,
   });
+
+  const finalizedCheckOutPhoto: AttendancePhotoMetadata | null = input.photo
+    ? {
+        ...input.photo,
+        employeeId: existing.employeeId,
+        attendanceId: existing.attendanceId,
+        photoType: 'check_out',
+      }
+    : existing.checkOutPhoto ?? null;
 
   const updated: AttendanceRecord = {
     ...existing,
     checkOutAt: nowIso,
     checkOutMethod: input.method,
     checkOutGeo,
+    checkOutPhoto: finalizedCheckOutPhoto,
+    locationStatus: nextLocationStatus,
+    verificationStatus: 'Pending',
+    isPayrollEligible: false,
     totalGrossMinutes: metrics.totalGrossMinutes,
     totalDutyMinutes: metrics.totalDutyMinutes,
     totalDutyHours: metrics.totalDutyHours,
     earlyDepartureMinutes: metrics.earlyDepartureMinutes,
     overtimeMinutes: metrics.overtimeMinutes,
     overtimeStatus:
-      metrics.overtimeMinutes >= 15
+      metrics.overtimeMinutes >= policy.overtimeMinimumMinutes
         ? existing.overtimeStatus === 'Approved'
           ? 'Approved'
           : 'Pending'
@@ -2519,7 +3329,7 @@ export async function submitEmployeeCheckOut(
     branchId: existing.branchId,
     action: `Employee Check-Out (${input.method})`,
     previousValueSummary: `Checked In at ${existing.checkInAt}`,
-    newValueSummary: `Checked Out at ${nowIso} · Net ${updated.totalDutyHours}h · OT ${updated.overtimeMinutes}m · Status ${updated.status}`,
+    newValueSummary: `Checked Out at ${nowIso} · Net ${updated.totalDutyHours}h · OT ${updated.overtimeMinutes}m · Status ${updated.status} · Photo: ${finalizedCheckOutPhoto ? 'Attached' : 'None'}`,
     reason: input.exceptionReason || '',
     timestamp: nowIso,
   });
@@ -2548,6 +3358,10 @@ export async function submitEmployeeCheckOut(
       checkOutAt: updated.checkOutAt,
       checkOutMethod: updated.checkOutMethod,
       checkOutGeo: updated.checkOutGeo,
+      checkOutPhoto: updated.checkOutPhoto,
+      locationStatus: updated.locationStatus,
+      verificationStatus: updated.verificationStatus,
+      isPayrollEligible: false,
       totalGrossMinutes: updated.totalGrossMinutes,
       totalDutyMinutes: updated.totalDutyMinutes,
       totalDutyHours: updated.totalDutyHours,
@@ -2715,12 +3529,17 @@ export async function recordManualHrAttendance(
     breakDurationMinutes: input.breakDurationMinutes,
     gracePeriodMinutes: input.gracePeriodMinutes,
     status: input.status,
+    verificationStatus: 'Verified',
+    locationStatus: 'Within Geofence',
+    isPayrollEligible: input.status !== 'Absent' && input.status !== 'Rejected',
     checkInAt,
     checkOutAt,
     checkInMethod: checkInAt ? 'Manual_HR' : null,
     checkOutMethod: checkOutAt ? 'Manual_HR' : null,
     checkInGeo: null,
     checkOutGeo: null,
+    checkInPhoto: null,
+    checkOutPhoto: null,
     qrSessionId: '',
     qrVerificationStatus: '',
     deviceMetadata: null,
@@ -2742,6 +3561,7 @@ export async function recordManualHrAttendance(
     exceptionReason: '',
     hrRemarks: sanitizeInput(input.hrRemarks, 300),
     fieldOfficerRemarks: '',
+    timeCorrectionHistory: [],
     createdBy: caller.uid,
     updatedBy: caller.uid,
     createdAt: nowIso,
@@ -2755,7 +3575,7 @@ export async function recordManualHrAttendance(
     siteId: site.siteId,
     branchId: site.branchId,
     action: `Manual HR Attendance Recorded (${input.status})`,
-    newValueSummary: `${emp.fullName} on ${input.attendanceDate} at ${site.siteName} -> ${input.status} (${totalDutyHours}h)`,
+    newValueSummary: `${emp.fullName} on ${input.attendanceDate} at ${site.siteName} -> ${input.status} (${totalDutyHours}h · Payroll Eligible: ${record.isPayrollEligible})`,
     reason: input.hrRemarks,
     timestamp: nowIso,
   });
@@ -2824,6 +3644,11 @@ export async function verifyOrUpdateAttendanceByHr(
     status: AttendanceStatus;
     hrRemarks: string;
     markVerified: boolean;
+    verificationDecision?: AttendanceVerificationStatus;
+    correctedCheckInTime24h?: string;
+    correctedCheckOutTime24h?: string;
+    correctedCheckOutNextDay?: boolean;
+    correctionReason?: string;
   }
 ): Promise<AttendanceRecord> {
   assertNotSitePortal(caller);
@@ -2836,9 +3661,12 @@ export async function verifyOrUpdateAttendanceByHr(
     const hasPerm =
       hasUserPermission(caller, 'attendance.verify') ||
       hasUserPermission(caller, 'attendance.edit') ||
-      hasUserPermission(caller, 'attendance.approve');
+      hasUserPermission(caller, 'attendance.approve') ||
+      hasUserPermission(caller, 'attendance.correct');
     if (!hasPerm) {
-      throw new Error('Verifying or updating attendance requires attendance.verify or attendance.edit permission.');
+      throw new Error(
+        'Verifying or updating attendance requires attendance.verify, attendance.edit, or attendance.correct permission.'
+      );
     }
   }
 
@@ -2850,7 +3678,6 @@ export async function verifyOrUpdateAttendanceByHr(
     throw new Error('Unauthorized branch scope for attendance verification.');
   }
 
-  // Resolving an Exception requires attendance.approve (or Admin)
   if (
     existing.status === 'Exception' &&
     params.status !== 'Exception' &&
@@ -2862,54 +3689,176 @@ export async function verifyOrUpdateAttendanceByHr(
   }
 
   const nowIso = new Date().toISOString();
-  const nextVerificationOutcome: AttendanceVerificationOutcome =
-    params.markVerified &&
-    (existing.verificationOutcome === 'Outside_Geofence' ||
-      existing.verificationOutcome === 'Low_GPS_Accuracy' ||
-      existing.verificationOutcome === 'Pending_Review')
+  let nextCheckInAt = existing.checkInAt;
+  let nextCheckOutAt = existing.checkOutAt;
+  let nextGrossMinutes = existing.totalGrossMinutes;
+  let nextDutyMinutes = existing.totalDutyMinutes;
+  let nextDutyHours = existing.totalDutyHours;
+  let nextLateMinutes = existing.lateArrivalMinutes;
+  let nextEarlyMinutes = existing.earlyDepartureMinutes;
+  let nextOvertimeMinutes = existing.overtimeMinutes;
+  let nextOvertimeStatus = existing.overtimeStatus;
+  const nextTimeCorrectionHistory: AttendanceTimeCorrectionEntry[] = [
+    ...(existing.timeCorrectionHistory || []),
+  ];
+
+  const hasTimeCorrection = Boolean(
+    (params.correctedCheckInTime24h && params.correctedCheckInTime24h.trim()) ||
+      (params.correctedCheckOutTime24h && params.correctedCheckOutTime24h.trim())
+  );
+
+  if (hasTimeCorrection) {
+    const reason = (params.correctionReason || params.hrRemarks || '').trim();
+    if (reason.length < 5) {
+      throw new Error(
+        'Enter a mandatory Time Correction Reason (at least 5 characters) to modify Check-In/Check-Out times.'
+      );
+    }
+    if (params.correctedCheckInTime24h && isValidTime24h(params.correctedCheckInTime24h)) {
+      nextCheckInAt = new Date(
+        combineDateAndTimeToMs(existing.attendanceDate, params.correctedCheckInTime24h)
+      ).toISOString();
+    }
+    if (params.correctedCheckOutTime24h && isValidTime24h(params.correctedCheckOutTime24h)) {
+      const outDate = params.correctedCheckOutNextDay
+        ? addDaysToIsoDate(existing.attendanceDate, 1)
+        : existing.attendanceDate;
+      nextCheckOutAt = new Date(
+        combineDateAndTimeToMs(outDate, params.correctedCheckOutTime24h)
+      ).toISOString();
+    }
+
+    if (nextCheckInAt && nextCheckOutAt) {
+      const calc = computeCheckOutMetrics({
+        attendanceDate: existing.attendanceDate,
+        scheduledStartTime: existing.scheduledStartTime,
+        scheduledEndTime: existing.scheduledEndTime,
+        breakDurationMinutes: existing.breakDurationMinutes,
+        gracePeriodMinutes: existing.gracePeriodMinutes,
+        checkInIso: nextCheckInAt,
+        checkOutIso: nextCheckOutAt,
+      });
+      nextGrossMinutes = calc.totalGrossMinutes;
+      nextDutyMinutes = calc.totalDutyMinutes;
+      nextDutyHours = calc.totalDutyHours;
+      nextLateMinutes = calc.lateArrivalMinutes;
+      nextEarlyMinutes = calc.earlyDepartureMinutes;
+      nextOvertimeMinutes = calc.overtimeMinutes;
+      if (nextOvertimeMinutes >= 15 && nextOvertimeStatus === 'None') {
+        nextOvertimeStatus = 'Pending';
+      }
+    } else if (nextCheckInAt) {
+      const l = computeCheckInLateMinutes(
+        existing.attendanceDate,
+        existing.scheduledStartTime,
+        existing.gracePeriodMinutes,
+        nextCheckInAt
+      );
+      nextLateMinutes = l.lateArrivalMinutes;
+    }
+
+    nextTimeCorrectionHistory.push({
+      correctedAt: nowIso,
+      correctedByUid: caller.uid,
+      correctedByName: caller.fullName,
+      previousCheckInAt: existing.checkInAt,
+      previousCheckOutAt: existing.checkOutAt,
+      newCheckInAt: nextCheckInAt,
+      newCheckOutAt: nextCheckOutAt,
+      reason: sanitizeInput(reason, 250),
+    });
+  }
+
+  const resolvedDecision: AttendanceVerificationStatus =
+    params.verificationDecision ||
+    (params.status === 'Rejected'
+      ? 'Rejected'
+      : params.markVerified
+        ? existing.status === 'Exception' ||
+          existing.verificationOutcome === 'Outside_Geofence' ||
+          existing.verificationOutcome === 'Low_GPS_Accuracy' ||
+          existing.verificationOutcome === 'GPS_Unavailable'
+          ? 'Exception Approved'
+          : 'Verified'
+        : deriveAttendanceVerificationStatus(existing));
+
+  const isRejected = resolvedDecision === 'Rejected' || params.status === 'Rejected';
+  const isVerifiedFlag =
+    resolvedDecision === 'Verified' || resolvedDecision === 'Exception Approved';
+
+  const nextVerificationOutcome: AttendanceVerificationOutcome = isRejected
+    ? 'Rejected'
+    : resolvedDecision === 'Exception Approved'
       ? 'Manual_Override'
-      : existing.verificationOutcome;
+      : isVerifiedFlag && existing.verificationOutcome === 'Pending_Review'
+        ? 'Verified'
+        : existing.verificationOutcome;
+
+  const finalStatus: AttendanceStatus = isRejected ? 'Rejected' : params.status;
+  const isPayrollEligible =
+    isVerifiedFlag &&
+    finalStatus !== 'Rejected' &&
+    finalStatus !== 'Absent' &&
+    finalStatus !== 'Pending';
 
   const updated: AttendanceRecord = {
     ...existing,
-    status: params.status,
-    hrRemarks: sanitizeInput(params.hrRemarks || existing.hrRemarks, 300),
+    status: finalStatus,
+    verificationStatus: resolvedDecision,
+    isPayrollEligible,
+    checkInAt: nextCheckInAt,
+    checkOutAt: nextCheckOutAt,
+    totalGrossMinutes: nextGrossMinutes,
+    totalDutyMinutes: nextDutyMinutes,
+    totalDutyHours: nextDutyHours,
+    lateArrivalMinutes: nextLateMinutes,
+    earlyDepartureMinutes: nextEarlyMinutes,
+    overtimeMinutes: nextOvertimeMinutes,
+    overtimeStatus: nextOvertimeStatus,
+    hrRemarks: sanitizeInput(
+      params.hrRemarks || params.correctionReason || existing.hrRemarks,
+      300
+    ),
     verificationOutcome: nextVerificationOutcome,
-    isVerifiedByHr: params.markVerified ? true : existing.isVerifiedByHr,
-    verifiedByUid: params.markVerified ? caller.uid : existing.verifiedByUid,
-    verifiedByName: params.markVerified ? caller.fullName : existing.verifiedByName,
-    verifiedAt: params.markVerified ? nowIso : existing.verifiedAt,
+    isVerifiedByHr: isVerifiedFlag,
+    verifiedByUid: isVerifiedFlag || isRejected ? caller.uid : existing.verifiedByUid,
+    verifiedByName: isVerifiedFlag || isRejected ? caller.fullName : existing.verifiedByName,
+    verifiedAt: isVerifiedFlag || isRejected ? nowIso : existing.verifiedAt,
+    timeCorrectionHistory: nextTimeCorrectionHistory,
     updatedBy: caller.uid,
     updatedAt: nowIso,
   };
 
   const auditEntry = buildAttendanceAuditEntry(caller, {
-    category: 'Attendance',
+    category: hasTimeCorrection ? 'Correction' : 'Attendance',
     targetId: attendanceId,
     employeeId: existing.employeeId,
     siteId: existing.siteId,
     branchId: existing.branchId,
-    action: params.markVerified ? 'Attendance Verified by HR' : 'Attendance Status Updated by HR',
-    previousValueSummary: `${existing.status} (Verified: ${existing.isVerifiedByHr})`,
-    newValueSummary: `${updated.status} (Verified: ${updated.isVerifiedByHr})`,
-    reason: params.hrRemarks,
+    action: hasTimeCorrection
+      ? `HR Time Correction & ${resolvedDecision}`
+      : `HR Attendance ${resolvedDecision}`,
+    previousValueSummary: `${existing.status} (${deriveAttendanceVerificationStatus(existing)} · In:${existing.checkInAt || '—'} Out:${existing.checkOutAt || '—'})`,
+    newValueSummary: `${updated.status} (${resolvedDecision} · Payroll:${isPayrollEligible} · In:${updated.checkInAt || '—'} Out:${updated.checkOutAt || '—'})`,
+    reason: params.correctionReason || params.hrRemarks,
     timestamp: nowIso,
   });
 
-  const notif = params.markVerified
-    ? buildEmployeeNotificationEntry({
-        employeeId: updated.employeeId,
-        linkedUid: updated.linkedUid,
-        branchId: updated.branchId,
-        siteId: updated.siteId,
-        siteName: updated.siteName,
-        category: 'Attendance Verified',
-        title: `Attendance Verified — ${updated.attendanceDate}`,
-        message: `Your shift at ${updated.siteName} on ${updated.attendanceDate} was verified as "${updated.status}" (${updated.totalDutyHours}h).`,
-        dutyDate: updated.attendanceDate,
-        createdAt: nowIso,
-      })
-    : null;
+  const notif =
+    isVerifiedFlag || isRejected
+      ? buildEmployeeNotificationEntry({
+          employeeId: updated.employeeId,
+          linkedUid: updated.linkedUid,
+          branchId: updated.branchId,
+          siteId: updated.siteId,
+          siteName: updated.siteName,
+          category: 'Attendance Verified',
+          title: `Attendance ${resolvedDecision} — ${updated.attendanceDate}`,
+          message: `Your shift at ${updated.siteName} on ${updated.attendanceDate} was marked "${updated.status}" (${resolvedDecision} · ${updated.totalDutyHours}h).`,
+          dutyDate: updated.attendanceDate,
+          createdAt: nowIso,
+        })
+      : null;
 
   if (!useLiveFirestore(isPreviewSession)) {
     const store = readLocalAttendanceStore();
@@ -2941,12 +3890,24 @@ export async function verifyOrUpdateAttendanceByHr(
     const batch = writeBatch(firestoreDb!);
     batch.update(doc(firestoreDb!, 'attendance', attendanceId), {
       status: updated.status,
+      verificationStatus: updated.verificationStatus,
+      isPayrollEligible: updated.isPayrollEligible,
+      checkInAt: updated.checkInAt,
+      checkOutAt: updated.checkOutAt,
+      totalGrossMinutes: updated.totalGrossMinutes,
+      totalDutyMinutes: updated.totalDutyMinutes,
+      totalDutyHours: updated.totalDutyHours,
+      lateArrivalMinutes: updated.lateArrivalMinutes,
+      earlyDepartureMinutes: updated.earlyDepartureMinutes,
+      overtimeMinutes: updated.overtimeMinutes,
+      overtimeStatus: updated.overtimeStatus,
       hrRemarks: updated.hrRemarks,
       verificationOutcome: updated.verificationOutcome,
       isVerifiedByHr: updated.isVerifiedByHr,
       verifiedByUid: updated.verifiedByUid,
       verifiedByName: updated.verifiedByName,
       verifiedAt: updated.verifiedAt,
+      timeCorrectionHistory: updated.timeCorrectionHistory,
       updatedBy: caller.uid,
       updatedAt: nowIso,
       serverUpdatedAt: serverTimestamp(),
@@ -3245,7 +4206,9 @@ export async function submitAttendanceCorrectionRequest(
     }
   } else {
     const allEmps = await listEmployees(caller, isPreviewSession);
-    emp = allEmps[0] ?? null;
+    emp = input.employeeId
+      ? allEmps.find((e) => e.employeeId === input.employeeId) ?? null
+      : allEmps[0] ?? null;
   }
   if (!emp) throw new Error('Employee context not found for correction request.');
 
@@ -3455,6 +4418,8 @@ export async function reviewAttendanceCorrectionRequest(
             : matchedAttendance.overtimeStatus,
         status: nextStatus,
         verificationOutcome: 'Manual_Override',
+        verificationStatus: 'Exception Approved',
+        isPayrollEligible: nextStatus !== 'Absent' && nextStatus !== 'Rejected',
         isVerifiedByHr: true,
         verifiedByUid: caller.uid,
         verifiedByName: caller.fullName,
@@ -3537,6 +4502,8 @@ export async function reviewAttendanceCorrectionRequest(
           overtimeApprovedBy: null,
           overtimeApprovedAt: null,
           verificationOutcome: 'Manual_Override',
+          verificationStatus: 'Exception Approved',
+          isPayrollEligible: calc.derivedStatus !== 'Absent' && calc.derivedStatus !== 'Rejected',
           isVerifiedByHr: true,
           verifiedByUid: caller.uid,
           verifiedByName: caller.fullName,
@@ -3554,8 +4521,10 @@ export async function reviewAttendanceCorrectionRequest(
   } else if (matchedAttendance && matchedAttendance.status === 'Exception') {
     updatedOrCreatedAttendance = {
       ...matchedAttendance,
-      status: 'Absent',
+      status: 'Rejected',
       verificationOutcome: 'Rejected',
+      verificationStatus: 'Rejected',
+      isPayrollEligible: false,
       isVerifiedByHr: true,
       verifiedByUid: caller.uid,
       verifiedByName: caller.fullName,
@@ -3859,5 +4828,425 @@ export async function getSitePortalAttendanceSummaries(
       .sort((a, b) => (b.attendanceDate || '').localeCompare(a.attendanceDate || ''));
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, path);
+  }
+}
+
+// ============================================================================
+// 9. FIELD OFFICER REPORTS & ATTENDANCE EXCEPTIONS (`attendanceExceptions`)
+// ============================================================================
+export async function listAttendanceExceptionReports(
+  caller: RexonUser,
+  isPreviewSession: boolean
+): Promise<AttendanceExceptionReport[]> {
+  assertNotSitePortal(caller);
+  if (caller.role === 'employee') return [];
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    let list = [...store.attendanceExceptions];
+    if (caller.role === 'hr') {
+      list = list.filter((e) => canCallerAccessBranchForAttendance(caller, e.branchId));
+    } else if (caller.role === 'field_officer') {
+      list = list.filter(
+        (e) => caller.assignedSiteIds.includes(e.siteId) || e.reportedByUid === caller.uid
+      );
+    }
+    return list.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  const path = 'attendanceExceptions';
+  try {
+    let q;
+    if (
+      caller.role === 'admin' ||
+      (caller.role === 'hr' && hasUserPermission(caller, 'attendance.view_all_branch'))
+    ) {
+      q = query(collection(firestoreDb!, path));
+    } else if (caller.role === 'hr') {
+      const branches = getAuthorizedBranchIds(caller);
+      if (branches.length === 0) return [];
+      q = query(collection(firestoreDb!, path), where('branchId', 'in', branches.slice(0, 10)));
+    } else if (caller.role === 'field_officer') {
+      if (!caller.assignedSiteIds || caller.assignedSiteIds.length === 0) {
+        q = query(collection(firestoreDb!, path), where('reportedByUid', '==', caller.uid));
+      } else {
+        q = query(
+          collection(firestoreDb!, path),
+          where('siteId', 'in', caller.assignedSiteIds.slice(0, 10))
+        );
+      }
+    } else {
+      return [];
+    }
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => d.data() as AttendanceExceptionReport)
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  } catch {
+    return [];
+  }
+}
+
+export async function submitFieldOfficerExceptionReport(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  input: SubmitFieldOfficerExceptionInput
+): Promise<AttendanceExceptionReport> {
+  assertNotSitePortal(caller);
+  if (caller.role !== 'field_officer' && caller.role !== 'hr' && caller.role !== 'admin') {
+    throw new Error('Only Field Officers, HR, or Admin can submit site attendance reports.');
+  }
+  if (!isValidIsoDate(input.attendanceDate)) {
+    throw new Error('Select a valid date (YYYY-MM-DD).');
+  }
+  if (!input.summary || input.summary.trim().length < 4) {
+    throw new Error('Enter a report summary (at least 4 characters).');
+  }
+  if (!input.remarks || input.remarks.trim().length < 6) {
+    throw new Error('Provide detailed field observations/remarks (at least 6 characters).');
+  }
+
+  const site = await getSiteByIdForAttendance(input.siteId, isPreviewSession);
+  if (!site) throw new Error('Selected deployment site not found.');
+
+  if (caller.role === 'field_officer' && !caller.assignedSiteIds.includes(site.siteId)) {
+    throw new Error('Field Officers can only submit reports for their assigned sites.');
+  }
+
+  let empName = '';
+  if (input.employeeId) {
+    const allEmps = await listEmployees(caller, isPreviewSession);
+    const matched = allEmps.find((e) => e.employeeId === input.employeeId);
+    empName = matched?.fullName || input.employeeId;
+  }
+
+  const nowIso = new Date().toISOString();
+  const existingList = await listAttendanceExceptionReports(caller, isPreviewSession);
+  const exceptionId = generateSequentialId(
+    'AEX',
+    existingList.map((e) => e.exceptionId)
+  );
+
+  const report: AttendanceExceptionReport = {
+    exceptionId,
+    reportType: input.reportType,
+    branchId: site.branchId,
+    clientId: site.clientId,
+    siteId: site.siteId,
+    siteName: site.siteName,
+    attendanceDate: input.attendanceDate,
+    employeeId: sanitizeInput(input.employeeId || '', 64),
+    employeeName: sanitizeInput(empName, 120),
+    shiftType: sanitizeInput(input.shiftType || 'All Shifts', 60),
+    summary: sanitizeInput(input.summary, 160),
+    remarks: sanitizeInput(input.remarks, 400),
+    photoUrl: input.photoUrl || '',
+    photoStoragePath: sanitizeInput(input.photoStoragePath || '', 240),
+    status: 'Pending HR Review',
+    reportedByUid: caller.uid,
+    reportedByName: caller.fullName,
+    reportedByRole: caller.role,
+    reviewedByUid: null,
+    reviewedByName: null,
+    hrResolutionNotes: '',
+    reviewedAt: null,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const auditEntry = buildAttendanceAuditEntry(caller, {
+    category: 'FieldReport',
+    targetId: exceptionId,
+    employeeId: report.employeeId,
+    siteId: site.siteId,
+    branchId: site.branchId,
+    action: `Field Report Submitted (${input.reportType})`,
+    newValueSummary: `${site.siteName} · ${input.attendanceDate}: ${report.summary}`,
+    reason: report.remarks,
+    timestamp: nowIso,
+  });
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    store.attendanceExceptions.unshift(report);
+    store.attendanceAuditLogs.unshift(auditEntry);
+    writeLocalAttendanceStore(store);
+    return report;
+  }
+
+  const path = `attendanceExceptions/${exceptionId}`;
+  try {
+    const batch = writeBatch(firestoreDb!);
+    batch.set(doc(firestoreDb!, 'attendanceExceptions', exceptionId), {
+      ...report,
+      serverCreatedAt: serverTimestamp(),
+    });
+    batch.set(doc(firestoreDb!, 'attendanceAuditLogs', auditEntry.auditId), {
+      ...auditEntry,
+      createdAt: serverTimestamp(),
+    });
+    await batch.commit();
+    notifyAttendanceListeners();
+    return report;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function reviewFieldOfficerExceptionReport(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  exceptionId: string,
+  decision: 'Resolved' | 'Rejected',
+  hrResolutionNotes: string
+): Promise<void> {
+  assertNotSitePortal(caller);
+  if (caller.role !== 'admin' && caller.role !== 'hr') {
+    throw new Error('Only Admin or authorized HR can resolve Field Officer attendance reports.');
+  }
+  if (!hrResolutionNotes || hrResolutionNotes.trim().length < 4) {
+    throw new Error('Enter HR resolution notes (at least 4 characters).');
+  }
+
+  const allReports = await listAttendanceExceptionReports(caller, isPreviewSession);
+  const target = allReports.find((r) => r.exceptionId === exceptionId);
+  if (!target) throw new Error('Field Officer report not found.');
+
+  if (caller.role === 'hr' && !getAuthorizedBranchIds(caller).includes(target.branchId)) {
+    throw new Error('Unauthorized branch scope for resolving this report.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const auditEntry = buildAttendanceAuditEntry(caller, {
+    category: 'FieldReport',
+    targetId: exceptionId,
+    employeeId: target.employeeId,
+    siteId: target.siteId,
+    branchId: target.branchId,
+    action: `Field Report ${decision} (${target.reportType})`,
+    previousValueSummary: target.status,
+    newValueSummary: `${decision}: ${hrResolutionNotes.trim()}`,
+    reason: hrResolutionNotes,
+    timestamp: nowIso,
+  });
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    store.attendanceExceptions = store.attendanceExceptions.map((r) =>
+      r.exceptionId === exceptionId
+        ? {
+            ...r,
+            status: decision,
+            reviewedByUid: caller.uid,
+            reviewedByName: caller.fullName,
+            hrResolutionNotes: sanitizeInput(hrResolutionNotes, 300),
+            reviewedAt: nowIso,
+            updatedAt: nowIso,
+          }
+        : r
+    );
+    store.attendanceAuditLogs.unshift(auditEntry);
+    writeLocalAttendanceStore(store);
+    return;
+  }
+
+  const path = `attendanceExceptions/${exceptionId}`;
+  try {
+    const batch = writeBatch(firestoreDb!);
+    batch.update(doc(firestoreDb!, 'attendanceExceptions', exceptionId), {
+      status: decision,
+      reviewedByUid: caller.uid,
+      reviewedByName: caller.fullName,
+      hrResolutionNotes: sanitizeInput(hrResolutionNotes, 300),
+      reviewedAt: nowIso,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    batch.set(doc(firestoreDb!, 'attendanceAuditLogs', auditEntry.auditId), {
+      ...auditEntry,
+      createdAt: serverTimestamp(),
+    });
+    await batch.commit();
+    notifyAttendanceListeners();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+// ============================================================================
+// 10. SITE GEOFENCE OVERRIDE APPROVALS (`attendanceApprovals`)
+// ============================================================================
+export async function listAttendanceApprovals(
+  caller: RexonUser,
+  isPreviewSession: boolean
+): Promise<AttendanceApprovalRecord[]> {
+  assertNotSitePortal(caller);
+  if (caller.role !== 'admin' && caller.role !== 'hr') return [];
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    const list = [...store.attendanceApprovals];
+    return (
+      caller.role === 'admin'
+        ? list
+        : list.filter(
+            (a) =>
+              a.requestedByUid === caller.uid ||
+              canCallerAccessBranchForAttendance(caller, a.branchId)
+          )
+    ).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  try {
+    const q =
+      caller.role === 'admin'
+        ? query(collection(firestoreDb!, 'attendanceApprovals'))
+        : query(
+            collection(firestoreDb!, 'attendanceApprovals'),
+            where('requestedByUid', '==', caller.uid)
+          );
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => d.data() as AttendanceApprovalRecord)
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  } catch {
+    return [];
+  }
+}
+
+export async function requestSiteGeofenceOverrideApproval(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  params: {
+    siteId: string;
+    requestedRadiusMeters: number;
+    reason: string;
+  }
+): Promise<AttendanceApprovalRecord> {
+  if (caller.role !== 'hr' && caller.role !== 'admin') {
+    throw new Error('Only HR or Admin can submit site geofence radius override requests.');
+  }
+  const site = await getSiteByIdForAttendance(params.siteId, isPreviewSession);
+  if (!site) throw new Error('Selected site not found.');
+  const cleanReason = sanitizeInput(params.reason, 300);
+  if (cleanReason.length < 6) {
+    throw new Error('Provide a justification reason (at least 6 characters) for Admin review.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const existing = await listAttendanceApprovals(caller, isPreviewSession);
+  const approvalId = generateSequentialId(
+    'AAP',
+    existing.map((a) => a.approvalId)
+  );
+  const geo = resolveSiteGeoSettings(site);
+
+  const record: AttendanceApprovalRecord = {
+    approvalId,
+    approvalType: 'Site Geofence Radius Override',
+    branchId: site.branchId,
+    siteId: site.siteId,
+    siteName: site.siteName,
+    requestedRadiusMeters: Math.min(5000, Math.max(20, Math.round(params.requestedRadiusMeters))),
+    currentRadiusMeters: geo.allowedRadiusMeters,
+    reason: cleanReason,
+    status: 'Pending',
+    requestedByUid: caller.uid,
+    requestedByName: caller.fullName,
+    requestedByRole: caller.role,
+    reviewedByUid: null,
+    reviewedByName: null,
+    reviewRemarks: '',
+    reviewedAt: null,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    store.attendanceApprovals.unshift(record);
+    writeLocalAttendanceStore(store);
+    return record;
+  }
+
+  const path = `attendanceApprovals/${approvalId}`;
+  try {
+    await setDoc(doc(firestoreDb!, 'attendanceApprovals', approvalId), {
+      ...record,
+      serverCreatedAt: serverTimestamp(),
+    });
+    notifyAttendanceListeners();
+    return record;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function reviewAttendanceApproval(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  approvalId: string,
+  decision: 'Approved' | 'Rejected',
+  reviewRemarks: string
+): Promise<void> {
+  if (caller.role !== 'admin') {
+    throw new Error('Only Administrators can approve or reject geofence radius override requests.');
+  }
+  const all = await listAttendanceApprovals(caller, isPreviewSession);
+  const target = all.find((a) => a.approvalId === approvalId);
+  if (!target) throw new Error('Approval request not found.');
+  if (target.status !== 'Pending') throw new Error('Approval request was already reviewed.');
+
+  const nowIso = new Date().toISOString();
+
+  if (decision === 'Approved') {
+    const site = await getSiteByIdForAttendance(target.siteId, isPreviewSession);
+    if (site) {
+      const geo = resolveSiteGeoSettings(site);
+      await configureSiteGeofenceAndQr(caller, isPreviewSession, {
+        siteId: site.siteId,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+        allowedRadiusMeters: target.requestedRadiusMeters,
+        gpsAccuracyThresholdMeters: geo.gpsAccuracyThresholdMeters,
+        isGpsMandatory: geo.isGpsMandatory,
+        isQrEnabled: geo.isQrEnabled,
+      });
+    }
+  }
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const store = readLocalAttendanceStore();
+    store.attendanceApprovals = store.attendanceApprovals.map((a) =>
+      a.approvalId === approvalId
+        ? {
+            ...a,
+            status: decision,
+            reviewedByUid: caller.uid,
+            reviewedByName: caller.fullName,
+            reviewRemarks: sanitizeInput(reviewRemarks || decision, 300),
+            reviewedAt: nowIso,
+            updatedAt: nowIso,
+          }
+        : a
+    );
+    writeLocalAttendanceStore(store);
+    return;
+  }
+
+  const path = `attendanceApprovals/${approvalId}`;
+  try {
+    await updateDoc(doc(firestoreDb!, 'attendanceApprovals', approvalId), {
+      status: decision,
+      reviewedByUid: caller.uid,
+      reviewedByName: caller.fullName,
+      reviewRemarks: sanitizeInput(reviewRemarks || decision, 300),
+      reviewedAt: nowIso,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    notifyAttendanceListeners();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
   }
 }

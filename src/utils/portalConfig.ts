@@ -96,6 +96,12 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         iconName: 'UserCog',
       },
       {
+        label: 'Field Officers',
+        shortLabel: 'Officers',
+        path: '/admin/field-officers',
+        iconName: 'UserCheck',
+      },
+      {
         label: 'Client Management',
         shortLabel: 'Clients',
         path: '/admin/clients',
@@ -159,6 +165,12 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         label: 'Permission Management',
         shortLabel: 'Permissions',
         path: '/admin/permissions',
+        iconName: 'KeyRound',
+      },
+      {
+        label: 'Portal IDs & Passwords',
+        shortLabel: 'IDs & Pass',
+        path: '/admin/credentials',
         iconName: 'KeyRound',
       },
       {
@@ -233,6 +245,12 @@ export const PORTAL_METADATA: Record<UserRole, PortalMetadata> = {
         shortLabel: 'Employees',
         path: '/hr/employees',
         iconName: 'Users',
+      },
+      {
+        label: 'Field Officers',
+        shortLabel: 'Officers',
+        path: '/hr/field-officers',
+        iconName: 'UserCheck',
       },
       {
         label: 'Site Assignments',

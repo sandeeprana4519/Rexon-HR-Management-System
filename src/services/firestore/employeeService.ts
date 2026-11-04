@@ -12,7 +12,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { deleteObject, ref } from 'firebase/storage';
 import {
   AssignedEmployeeDesignation,
   BranchRecord,
@@ -27,33 +27,49 @@ import {
   EmployeePrivateRecord,
   EmployeeRecord,
   EmployeeStatus,
+  IssuedPortalCredentials,
   OperationType,
   RexonUser,
   SENSITIVE_KYC_DOCUMENT_TYPES,
   ServiceCategory,
   SiteRecord,
 } from '../../types';
-import { DEMO_ACCOUNTS } from '../../utils/demoCredentials';
 import {
   maskAadhaarNumber,
   maskBankAccount,
   validateEmployeeDocumentFile,
   validateEmployeeForm,
 } from '../../utils/employeeValidation';
-import { getAuthorizedBranchIds, hasUserPermission } from '../../utils/portalConfig';
+import {
+  getAuthorizedBranchIds,
+  getPortalByRole,
+  hasUserPermission,
+} from '../../utils/portalConfig';
 import { sanitizeInput } from '../../utils/validation';
 import {
+  buildSystemPortalLoginEmail,
+  compressImageFileToDataUrl,
   firebaseStorage,
   firestoreDb,
+  generateDefaultPortalPassword,
   isFirebaseConfigured,
+  processInstantPhotoAsset,
+  provisionFirebaseUserIsolated,
+  uploadToStorageWithFastTimeout,
 } from '../firebase/config';
 import { handleFirestoreError } from './errorHandler';
 import {
   listBranches,
   listDesignations,
+  listFieldOfficers,
   listSites,
   recordExternalMasterAudit,
 } from './masterDataService';
+import {
+  getPortalUserByUid,
+  listPreviewProvisionedUsers,
+  upsertPreviewProvisionedUser,
+} from './userRoleService';
 
 const EMPLOYEE_STORAGE_KEY = 'rexon_phase3_employees_v1';
 
@@ -260,7 +276,7 @@ async function resolveLinkedEmployeeUid(
   if (!cleanEmail) return '';
 
   if (!useLiveFirestore(isPreviewSession)) {
-    if (cleanEmail === DEMO_ACCOUNTS.employee.email.toLowerCase()) {
+    if (cleanEmail === 'employee@rexon.com') {
       return 'demo-employee-001';
     }
     return '';
@@ -309,38 +325,15 @@ export async function listAvailableFieldOfficers(
   isPreviewSession: boolean
 ): Promise<FieldOfficerOption[]> {
   assertNotSitePortal(caller);
-
-  if (!useLiveFirestore(isPreviewSession)) {
-    const demoFo = DEMO_ACCOUNTS.field_officer;
-    return [
-      {
-        uid: 'demo-field_officer-001',
-        fullName: demoFo.fullName.replace(' (Demo Field Officer)', ''),
-        branchId: demoFo.branchId,
-        phone: demoFo.phone,
-      },
-    ];
-  }
-
   try {
-    const allowedBranches = getAuthorizedBranchIds(caller);
-    const q =
-      caller.role === 'admin'
-        ? query(collection(firestoreDb!, 'users'), where('role', '==', 'field_officer'))
-        : query(
-            collection(firestoreDb!, 'users'),
-            where('role', '==', 'field_officer'),
-            where('branchId', 'in', allowedBranches.slice(0, 10))
-          );
-    const snap = await getDocs(q);
-    return snap.docs
-      .map((d) => d.data() as RexonUser)
-      .filter((u) => u.isActive)
-      .map((u) => ({
-        uid: u.uid,
-        fullName: u.fullName,
-        branchId: u.branchId,
-        phone: u.phone,
+    const officers = await listFieldOfficers(caller, isPreviewSession);
+    return officers
+      .filter((fo) => fo.isActive)
+      .map((fo) => ({
+        uid: fo.uid,
+        fullName: `${fo.fullName} (${fo.fieldOfficerId})`,
+        branchId: fo.branchId,
+        phone: fo.phone,
       }));
   } catch {
     return [];
@@ -624,31 +617,42 @@ export async function uploadEmployeeProfilePhoto(
   file: File
 ): Promise<string> {
   assertNotSitePortal(caller);
-  const check = validateEmployeeDocumentFile(file, 'Photograph');
-  if (!check.valid) {
-    throw new Error(check.error ?? 'Invalid profile photograph.');
-  }
+  return processInstantPhotoAsset(file, {
+    storagePath: `employee_documents/${branchId || 'GENERAL'}/${employeeRefId || 'NEW_EMP'}/photo_${Date.now()}.jpg`,
+    tryCloudStorage: useLiveFirestore(isPreviewSession),
+    maxDimension: 280,
+  });
+}
 
-  if (!useLiveFirestore(isPreviewSession) || !firebaseStorage) {
-    return readFileAsDataUrl(file);
-  }
-
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
-  const storagePath = `employee_documents/${branchId}/${employeeRefId}/photo_${Date.now()}_${safeName}`;
-  const storageRef = ref(firebaseStorage, storagePath);
-  await uploadBytes(storageRef, file, { contentType: file.type });
-  return getDownloadURL(storageRef);
+export interface CreateEmployeeAuthOptions {
+  initialPassword?: string;
 }
 
 export async function createEmployeeRecord(
   caller: RexonUser,
   isPreviewSession: boolean,
-  input: EmployeeFormInput
-): Promise<EmployeeRecord> {
+  rawInput: EmployeeFormInput,
+  authOptions?: CreateEmployeeAuthOptions
+): Promise<EmployeeRecord & { issuedCredentials?: IssuedPortalCredentials }> {
   assertNotSitePortal(caller);
   if (caller.role !== 'admin' && !hasUserPermission(caller, 'employee.create')) {
     throw new Error('Creating an employee requires Admin authority or HR employee.create permission.');
   }
+
+  const hasAnyFinancialField = Boolean(
+    rawInput.basicSalary.trim() ||
+      rawInput.bankAccountNumber.trim() ||
+      rawInput.bankName.trim() ||
+      rawInput.ifscCode.trim() ||
+      rawInput.panNumber.trim() ||
+      rawInput.aadhaarNumber.trim()
+  );
+
+  const input: EmployeeFormInput = {
+    ...rawInput,
+    includePrivateFinancials: rawInput.includePrivateFinancials && hasAnyFinancialField,
+  };
+
   if (caller.role === 'hr' && !getAuthorizedBranchIds(caller).includes(input.branchId)) {
     throw new Error('HR accounts can only register employees under their assigned branch(es).');
   }
@@ -681,8 +685,6 @@ export async function createEmployeeRecord(
     throw new Error('Selected Deployment Site must belong to the employee’s assigned branch.');
   }
 
-  // Generate unique Employee ID across all existing records (including soft-deleted)
-  // and prevent duplicate active employees (mobile, email, Aadhaar, PAN)
   let existingEmployees: EmployeeRecord[] = [];
   if (!useLiveFirestore(isPreviewSession)) {
     const localStore = readLocalEmployeeStore();
@@ -750,7 +752,32 @@ export async function createEmployeeRecord(
 
   const nowIso = new Date().toISOString();
   const actorLabel = `${caller.fullName} (${caller.role})`;
-  const linkedUid = await resolveLinkedEmployeeUid(input.linkedUid, input.email, isPreviewSession);
+
+  const cleanInitialPassword = (authOptions?.initialPassword ?? '').trim();
+  if (cleanInitialPassword.length > 0 && cleanInitialPassword.length < 6) {
+    throw new Error('Employee Portal Login Password must be at least 6 characters long.');
+  }
+
+  let portalLoginEmail = sanitizeInput(
+    normalizedEmail || buildSystemPortalLoginEmail(employeeId),
+    160
+  );
+  let portalPassword = generateDefaultPortalPassword(input.mobile, cleanInitialPassword);
+  let provisionedEmployeeUid = `preview-emp-${employeeId.toLowerCase()}`;
+
+  if (useLiveFirestore(isPreviewSession)) {
+    const provisioned = await provisionFirebaseUserIsolated({
+      email: portalLoginEmail,
+      initialPassword: cleanInitialPassword,
+      mobileForDefaultPassword: input.mobile,
+      existingAuthUid: input.linkedUid,
+    });
+    provisionedEmployeeUid = provisioned.uid;
+    portalLoginEmail = provisioned.emailUsed;
+    portalPassword = provisioned.passwordUsed;
+  }
+
+  const linkedUid = provisionedEmployeeUid;
 
   const assignedDesignations = buildAssignedDesignationList(
     input.selectedDesignationIds,
@@ -778,7 +805,7 @@ export async function createEmployeeRecord(
     gender: input.gender,
     mobile: sanitizeInput(input.mobile, 20),
     alternateMobile: sanitizeInput(input.alternateMobile, 20),
-    email: sanitizeInput(input.email.toLowerCase(), 160),
+    email: portalLoginEmail,
     currentAddress: sanitizeInput(input.currentAddress, 300),
     permanentAddress: sanitizeInput(input.permanentAddress, 300),
     city: sanitizeInput(input.city, 80),
@@ -819,6 +846,21 @@ export async function createEmployeeRecord(
     updatedBy: actorLabel,
   };
 
+  const empPortal = getPortalByRole('employee');
+  const issuedCredentials: IssuedPortalCredentials = {
+    role: 'employee',
+    portalName: empPortal.portalName,
+    loginPath: empPortal.loginPath,
+    systemId: employeeId,
+    fullName: record.fullName,
+    loginEmail: portalLoginEmail,
+    loginPassword: portalPassword,
+    uid: linkedUid,
+    branchLabel: record.branchName,
+    siteLabel: record.currentSiteName || 'Available Pool',
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
+
   const canSavePrivate =
     input.includePrivateFinancials && canCallerReadSensitivePrivate(caller, record.branchId);
 
@@ -854,7 +896,7 @@ export async function createEmployeeRecord(
       branchId: record.branchId,
       category: 'Activity',
       action: 'Employee Registered',
-      summary: `Registered ${record.fullName} (${employeeId}) under ${record.branchName} as ${record.employmentType} (${record.employeeStatus}).`,
+      summary: `Registered ${record.fullName} (${employeeId}) under ${record.branchName} as ${record.employmentType} (${record.employeeStatus}) with Portal Login ${portalLoginEmail}.`,
       timestamp: nowIso,
     }),
     buildHistoryRecord(caller, {
@@ -898,6 +940,26 @@ export async function createEmployeeRecord(
     }
     store.employeeHistory.unshift(...historyItems);
     writeLocalEmployeeStore(store);
+
+    upsertPreviewProvisionedUser({
+      uid: linkedUid,
+      systemId: employeeId,
+      fullName: record.fullName,
+      email: portalLoginEmail,
+      phone: record.mobile,
+      ...(record.profilePhoto ? { profilePhoto: record.profilePhoto } : {}),
+      designationLabel: assignedDesignations[0]?.designationName || 'Employee',
+      initialAccessKey: portalPassword,
+      role: 'employee',
+      branchId: record.branchId,
+      assignedBranches: [record.branchId],
+      assignedSiteIds: siteObj ? [siteObj.siteId] : [],
+      permissions: [],
+      isActive: record.isActive,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
     await recordExternalMasterAudit(caller, isPreviewSession, {
       action: 'Employee Registered',
       module: 'Employee',
@@ -905,12 +967,42 @@ export async function createEmployeeRecord(
       branchId: record.branchId,
       summary: auditSummary,
     });
-    return record;
+    return { ...record, issuedCredentials };
   }
 
   const path = `employees/${employeeId}`;
   try {
     const batch = writeBatch(firestoreDb!);
+    const empUserPayload = {
+      uid: provisionedEmployeeUid,
+      systemId: employeeId,
+      fullName: record.fullName,
+      email: portalLoginEmail,
+      phone: record.mobile,
+      ...(record.profilePhoto ? { profilePhoto: record.profilePhoto } : {}),
+      designationLabel: sanitizeInput(
+        assignedDesignations[0]?.designationName || 'Employee',
+        100
+      ),
+      initialAccessKey: portalPassword,
+      role: 'employee',
+      branchId: record.branchId,
+      assignedBranches: [record.branchId],
+      assignedSiteIds: siteObj ? [siteObj.siteId] : [],
+      permissions: [],
+      isActive: record.isActive,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    const canBatchProvisionUser =
+      caller.role === 'admin' ||
+      (caller.role === 'hr' && hasUserPermission(caller, 'employee.manage'));
+
+    if (provisionedEmployeeUid && canBatchProvisionUser) {
+      batch.set(doc(firestoreDb!, 'users', provisionedEmployeeUid), empUserPayload);
+    }
+
     batch.set(doc(firestoreDb!, 'employees', employeeId), {
       ...record,
       serverCreatedAt: serverTimestamp(),
@@ -932,6 +1024,15 @@ export async function createEmployeeRecord(
     }
 
     await batch.commit();
+
+    if (provisionedEmployeeUid && !canBatchProvisionUser) {
+      try {
+        await setDoc(doc(firestoreDb!, 'users', provisionedEmployeeUid), empUserPayload);
+      } catch {
+        // Non-fatal if HR user lacks employee.manage on older deployed ruleset
+      }
+    }
+
     await recordExternalMasterAudit(caller, isPreviewSession, {
       action: 'Employee Registered',
       module: 'Employee',
@@ -940,10 +1041,95 @@ export async function createEmployeeRecord(
       summary: auditSummary,
     });
     notifyEmployeeListeners();
-    return record;
+    return { ...record, issuedCredentials };
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
+}
+
+export async function getIssuedCredentialsForEmployee(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  emp: EmployeeRecord
+): Promise<IssuedPortalCredentials> {
+  if (
+    caller.role !== 'admin' &&
+    !(
+      caller.role === 'hr' &&
+      (hasUserPermission(caller, 'employee.manage') || hasUserPermission(caller, 'employee.create'))
+    )
+  ) {
+    throw new Error('Unauthorized to view Employee Portal credentials.');
+  }
+
+  const empPortal = getPortalByRole('employee');
+  let uid = emp.linkedUid || '';
+  let loginEmail =
+    emp.email?.trim().toLowerCase() || buildSystemPortalLoginEmail(emp.employeeId);
+  let loginPassword = generateDefaultPortalPassword(emp.mobile);
+
+  const existingUserDoc = uid
+    ? await getPortalUserByUid(caller, uid, isPreviewSession)
+    : null;
+
+  if (existingUserDoc) {
+    loginEmail = existingUserDoc.email || loginEmail;
+    loginPassword = existingUserDoc.initialAccessKey || loginPassword;
+  } else if (
+    useLiveFirestore(isPreviewSession) &&
+    (caller.role === 'admin' || hasUserPermission(caller, 'employee.manage'))
+  ) {
+    const isolated = await provisionFirebaseUserIsolated({
+      email: loginEmail,
+      mobileForDefaultPassword: emp.mobile,
+    });
+    uid = isolated.uid;
+    loginEmail = isolated.emailUsed;
+    loginPassword = isolated.passwordUsed;
+    const nowIso = new Date().toISOString();
+    await setDoc(doc(firestoreDb!, 'users', uid), {
+      uid,
+      systemId: emp.employeeId,
+      fullName: emp.fullName,
+      email: loginEmail,
+      phone: emp.mobile,
+      ...(emp.profilePhoto ? { profilePhoto: emp.profilePhoto } : {}),
+      designationLabel: sanitizeInput(
+        emp.assignedDesignations?.[0]?.designationName || 'Employee',
+        100
+      ),
+      initialAccessKey: loginPassword,
+      role: 'employee',
+      branchId: emp.branchId,
+      assignedBranches: [emp.branchId],
+      assignedSiteIds: emp.currentSiteId ? [emp.currentSiteId] : [],
+      permissions: [],
+      isActive: emp.isActive,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await updateDoc(doc(firestoreDb!, 'employees', emp.employeeId), {
+      linkedUid: uid,
+      email: loginEmail,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    notifyEmployeeListeners();
+  }
+
+  return {
+    role: 'employee',
+    portalName: empPortal.portalName,
+    loginPath: empPortal.loginPath,
+    systemId: emp.employeeId,
+    fullName: emp.fullName,
+    loginEmail,
+    loginPassword,
+    uid: uid || `emp-${emp.employeeId.toLowerCase()}`,
+    branchLabel: emp.branchName,
+    siteLabel: emp.currentSiteName || 'Available Pool',
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
 }
 
 export async function updateEmployeeRecord(
@@ -1254,6 +1440,24 @@ export async function updateEmployeeRecord(
     }
 
     await batch.commit();
+
+    if (updated.linkedUid && caller.role === 'admin') {
+      try {
+        await updateDoc(doc(firestoreDb!, 'users', updated.linkedUid), {
+          fullName: updated.fullName,
+          phone: updated.mobile,
+          ...(updated.profilePhoto ? { profilePhoto: updated.profilePhoto } : {}),
+          branchId: updated.branchId,
+          assignedBranches: [updated.branchId],
+          assignedSiteIds: updated.currentSiteId ? [updated.currentSiteId] : [],
+          isActive: updated.isActive,
+          updatedAt: nowIso,
+        });
+      } catch {
+        // Non-fatal if linked user doc was not yet created
+      }
+    }
+
     await recordExternalMasterAudit(caller, isPreviewSession, {
       action: 'Employee Updated',
       module: 'Employee',
@@ -1343,6 +1547,18 @@ export async function toggleEmployeeActiveStatus(
       serverCreatedAt: serverTimestamp(),
     });
     await batch.commit();
+
+    if (existing.linkedUid && caller.role === 'admin') {
+      try {
+        await updateDoc(doc(firestoreDb!, 'users', existing.linkedUid), {
+          isActive,
+          updatedAt: nowIso,
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
     await recordExternalMasterAudit(caller, isPreviewSession, {
       action: 'Employee Status Changed',
       module: 'Employee',
@@ -1439,6 +1655,18 @@ export async function softDeleteEmployeeRecord(
       serverCreatedAt: serverTimestamp(),
     });
     await batch.commit();
+
+    if (existing.linkedUid && caller.role === 'admin') {
+      try {
+        await updateDoc(doc(firestoreDb!, 'users', existing.linkedUid), {
+          isActive: false,
+          updatedAt: nowIso,
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
     await recordExternalMasterAudit(caller, isPreviewSession, {
       action: 'Employee Soft-Deleted',
       module: 'Employee',
@@ -1564,11 +1792,21 @@ export async function uploadEmployeeDocument(
 
   let downloadUrl = '';
   if (useLiveFirestore(isPreviewSession) && firebaseStorage) {
-    const fileRef = ref(firebaseStorage, storagePath);
-    await uploadBytes(fileRef, params.file, { contentType: params.file.type });
-    downloadUrl = await getDownloadURL(fileRef);
-  } else {
-    downloadUrl = await readFileAsDataUrl(params.file);
+    const remoteUrl = await uploadToStorageWithFastTimeout(storagePath, params.file, 4500);
+    if (remoteUrl) {
+      downloadUrl = remoteUrl;
+    }
+  }
+  if (!downloadUrl) {
+    if (params.file.type.startsWith('image/')) {
+      downloadUrl = await compressImageFileToDataUrl(params.file, 1050, 0.74);
+    } else if (!useLiveFirestore(isPreviewSession) || params.file.size <= 650 * 1024) {
+      downloadUrl = await readFileAsDataUrl(params.file);
+    } else {
+      throw new Error(
+        'Firebase Storage is not initialized on this project yet. Upload an image scan (JPG, PNG, WEBP) or a PDF under 650 KB, or enable Firebase Storage in Firebase Console.'
+      );
+    }
   }
 
   const nowIso = new Date().toISOString();

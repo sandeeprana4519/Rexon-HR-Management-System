@@ -18,11 +18,14 @@ const BANK_ACC_REGEX = /^[0-9]{9,18}$/;
 export const ALLOWED_DOCUMENT_MIME_TYPES = [
   'application/pdf',
   'image/jpeg',
+  'image/jpg',
   'image/png',
   'image/webp',
+  'image/heic',
+  'image/heif',
 ] as const;
 
-export const MAX_DOCUMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_DOCUMENT_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB (supports phone camera photos)
 
 export function requirementNeedsVerification(rawRequirement: string | undefined): boolean {
   if (!rawRequirement) return false;
@@ -292,22 +295,29 @@ export function validateEmployeeDocumentFile(
   if (!file) {
     return { valid: false, error: 'Select a PDF or image file to upload.' };
   }
-  if (!(ALLOWED_DOCUMENT_MIME_TYPES as readonly string[]).includes(file.type)) {
+  const isImageByTypeOrExt =
+    (file.type && file.type.startsWith('image/')) ||
+    /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(file.name || '');
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+
+  if (documentType === 'Photograph') {
+    if (!isImageByTypeOrExt) {
+      return {
+        valid: false,
+        error: 'Employee Photograph must be an image file (JPG, PNG, or WEBP).',
+      };
+    }
+  } else if (!isImageByTypeOrExt && !isPdf) {
     return {
       valid: false,
       error: 'Unsupported file format. Upload PDF, JPG, PNG, or WEBP files only.',
     };
   }
+
   if (file.size <= 0 || file.size > MAX_DOCUMENT_SIZE_BYTES) {
     return {
       valid: false,
-      error: 'File size exceeds the 5 MB limit. Compress the document or scan and retry.',
-    };
-  }
-  if (documentType === 'Photograph' && !file.type.startsWith('image/')) {
-    return {
-      valid: false,
-      error: 'Employee Photograph must be an image file (JPG, PNG, or WEBP).',
+      error: 'File size exceeds the 15 MB limit. Please select a file under 15 MB.',
     };
   }
   return { valid: true };

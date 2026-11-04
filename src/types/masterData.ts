@@ -714,6 +714,9 @@ export type SiteStatus = (typeof SITE_STATUSES)[number];
 export interface SiteRecord {
   siteId: string; // Automatic unique ID (e.g. STE-2026-0001)
   siteName: string;
+  sitePhoto?: string;
+  sitePortalUid?: string;
+  sitePortalEmail?: string;
   clientId: string; // Every Site must belong to one Client
   clientName: string;
   branchId: string;
@@ -749,6 +752,8 @@ export interface SiteRecord {
 export type SiteFormInput = Omit<
   SiteRecord,
   | 'siteId'
+  | 'sitePortalUid'
+  | 'sitePortalEmail'
   | 'createdBy'
   | 'createdAt'
   | 'updatedAt'
@@ -757,6 +762,36 @@ export type SiteFormInput = Omit<
   | 'archivedBy'
   | 'history'
 >;
+
+export interface FieldOfficerRecord {
+  fieldOfficerId: string; // e.g. FO-2026-0001
+  uid: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  profilePhoto: string;
+  designationLabel: string;
+  branchId: string;
+  assignedBranches: string[];
+  assignedSiteIds: string[];
+  isActive: boolean;
+  initialAccessKey?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FieldOfficerFormInput {
+  fullName: string;
+  email: string;
+  phone: string;
+  profilePhoto: string;
+  designationLabel: string;
+  branchId: string;
+  assignedBranches: string[];
+  assignedSiteIds: string[];
+  isActive: boolean;
+  initialPassword?: string;
+}
 
 // ============================================================================
 // 5. SERVICE MANAGEMENT TYPES (STORED IN FIRESTORE `services` COLLECTION)

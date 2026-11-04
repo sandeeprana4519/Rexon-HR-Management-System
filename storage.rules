@@ -22,8 +22,13 @@ service firebase.storage {
 
     function isBootstrappedAdmin() {
       return isSignedIn()
-        && request.auth.token.email == 'sandeeprana4519@gmail.com'
-        && request.auth.token.email_verified == true;
+        && (
+          request.auth.uid == 'Z8PuegekpDQiPzGIzleDYUVkjqI3'
+          || (
+            request.auth.token.email == 'sandeeprana4519@gmail.com'
+            && request.auth.token.email_verified == true
+          )
+        );
     }
 
     function isAdmin() {
@@ -88,13 +93,13 @@ service firebase.storage {
 
     function isValidDocumentUpload() {
       return request.resource != null
-        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.size <= 15 * 1024 * 1024
         && request.resource.contentType.matches('application/pdf|image/jpeg|image/png|image/webp');
     }
 
     function isValidPhotoUpload() {
       return request.resource != null
-        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.size <= 15 * 1024 * 1024
         && request.resource.contentType.matches('image/jpeg|image/png|image/webp');
     }
 
@@ -176,7 +181,12 @@ service firebase.storage {
       allow read: if isAdmin()
         || isHRAuthorizedForSite(siteId)
         || isFieldOfficerForSite(siteId);
-      allow create: if (isAdmin() || isFieldOfficerForSite(siteId)) && isValidPhotoUpload();
+      allow create: if (
+          isAdmin()
+          || isHRAuthorizedForSite(siteId)
+          || isFieldOfficerForSite(siteId)
+        )
+        && isValidPhotoUpload();
       allow update, delete: if isAdmin();
     }
 
@@ -200,6 +210,29 @@ service firebase.storage {
     match /hr_profiles/{hrId}/{fileName} {
       allow read: if isAdmin() || (isActiveUser() && userDoc().data.role == 'hr');
       allow write: if isAdmin() && isValidPhotoUpload();
+    }
+
+    // ------------------------------------------------------------------------
+    // 5C. Phase 4 Employee Check-In / Check-Out Attendance Verification Photos
+    //     Strictly private: Admin, authorized Branch HR, Branch Field Officer (read),
+    //     and owning Employee ONLY. NEVER public and NEVER accessible to Site Portal.
+    // ------------------------------------------------------------------------
+    match /attendance_photos/{branchId}/{employeeRef}/{fileName} {
+      allow read: if isAdmin()
+        || isHRForBranch(branchId)
+        || isEmployeeOwnerOfRef(employeeRef)
+        || (
+          isActiveUser()
+          && userDoc().data.role == 'field_officer'
+          && userDoc().data.branchId == branchId
+        );
+      allow create: if (
+          isAdmin()
+          || isHRForBranch(branchId)
+          || isEmployeeOwnerOfRef(employeeRef)
+        )
+        && isValidPhotoUpload();
+      allow update, delete: if isAdmin();
     }
 
     // ------------------------------------------------------------------------

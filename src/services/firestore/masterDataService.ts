@@ -13,7 +13,6 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
   ApprovalRequestRecord,
   AuditLogRecord,
@@ -26,11 +25,14 @@ import {
   ClientRecord,
   DesignationFormInput,
   DesignationRecord,
+  FieldOfficerFormInput,
+  FieldOfficerRecord,
   HR_PERMISSIONS,
   HRAccountStatus,
   HistoryEntry,
   HRProfileFormInput,
   HRProfileRecord,
+  IssuedPortalCredentials,
   MasterActiveStatus,
   OperationType,
   PERMISSION_PROFILE_MAP,
@@ -49,12 +51,14 @@ import {
   SiteStatus,
   SubmitApprovalInput,
 } from '../../types';
+import { DEMO_ACCOUNTS } from '../../utils/demoCredentials';
 import {
   computeNonNegativeVacancy,
   normalizeCode,
   validateBranchForm,
   validateClientForm,
   validateDesignationForm,
+  validateFieldOfficerForm,
   validateHRProfileForm,
   validateServiceForm,
   validateSiteForm,
@@ -62,18 +66,27 @@ import {
 } from '../../utils/masterValidation';
 import {
   getAuthorizedBranchIds,
+  getPortalByRole,
   hasUserPermission,
   normalizePermissionList,
 } from '../../utils/portalConfig';
 import { sanitizeInput } from '../../utils/validation';
 import {
+  buildSystemPortalLoginEmail,
   firebaseAuth,
-  firebaseStorage,
   firestoreDb,
+  generateDefaultPortalPassword,
   isFirebaseConfigured,
+  processInstantPhotoAsset,
   provisionFirebaseUserIsolated,
 } from '../firebase/config';
 import { handleFirestoreError } from './errorHandler';
+import {
+  getPortalUserByUid,
+  listPreviewProvisionedUsers,
+  parseFirestoreUserDocument,
+  upsertPreviewProvisionedUser,
+} from './userRoleService';
 
 const STORAGE_KEY = 'rexon_phase2_master_data_v1';
 
@@ -1330,13 +1343,17 @@ export async function recordExternalMasterAudit(
     return;
   }
   const logId = makeRuntimeLogId();
-  await setDoc(doc(firestoreDb!, 'auditLogs', logId), {
-    ...buildAuditLogObject(actor, {
-      logId,
-      ...params,
-    }),
-    createdAt: serverTimestamp(),
-  });
+  try {
+    await setDoc(doc(firestoreDb!, 'auditLogs', logId), {
+      ...buildAuditLogObject(actor, {
+        logId,
+        ...params,
+      }),
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Non-fatal audit log write warning:', err);
+  }
   notifyListeners();
 }
 
@@ -1739,69 +1756,16 @@ export async function softDeleteBranchRecord(
 // ============================================================================
 // 2. HR ACCOUNT & GRANULAR PERMISSION MANAGEMENT (ADMIN ONLY)
 // ============================================================================
-async function compressImageToAvatarDataUrl(file: File): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Failed to read selected profile image.'));
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      if (!dataUrl) {
-        resolve('');
-        return;
-      }
-      const img = new Image();
-      img.onerror = () => resolve(dataUrl);
-      img.onload = () => {
-        try {
-          const maxDim = 192;
-          const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
-          const width = Math.max(1, Math.round(img.width * scale));
-          const height = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(dataUrl);
-            return;
-          }
-          ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.78));
-        } catch {
-          resolve(dataUrl);
-        }
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 export async function uploadHRProfilePhoto(
   hrId: string,
   file: File,
   isPreviewSession: boolean
 ): Promise<string> {
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-    throw new Error('Profile photo must be a JPG, PNG, or WebP image.');
-  }
-  if (file.size > 2 * 1024 * 1024) {
-    throw new Error('Profile photo must be 2 MB or smaller.');
-  }
-
-  if (useLiveFirestore(isPreviewSession) && firebaseStorage) {
-    try {
-      const storagePath = `hr_profiles/${hrId}/avatar_${Date.now()}`;
-      const storageRef = ref(firebaseStorage, storagePath);
-      await uploadBytes(storageRef, file, { contentType: file.type });
-      return await getDownloadURL(storageRef);
-    } catch {
-      // Fallback to compact resized avatar if Firebase Storage bucket is not initialized yet
-      return await compressImageToAvatarDataUrl(file);
-    }
-  }
-
-  return await compressImageToAvatarDataUrl(file);
+  return processInstantPhotoAsset(file, {
+    storagePath: `hr_profiles/${hrId || 'NEW_HR'}/avatar_${Date.now()}.jpg`,
+    tryCloudStorage: useLiveFirestore(isPreviewSession),
+    maxDimension: 280,
+  });
 }
 
 export async function listHRProfiles(
@@ -1831,6 +1795,7 @@ export async function listHRProfiles(
 export interface CreateHRAccountOutcome {
   record: HRProfileRecord;
   provisioningNote: string;
+  issuedCredentials: IssuedPortalCredentials;
 }
 
 export interface CreateHRAccountAuthOptions {
@@ -1869,71 +1834,29 @@ export async function createHRProfileAccount(
     photoUrl = await uploadHRProfilePhoto(hrId, photoFile, isPreviewSession);
   }
 
-  let provisionedUid = `pending-auth-${hrId.toLowerCase()}`;
+  const resolvedEmail = sanitizeInput(
+    input.email.trim() ? input.email.toLowerCase() : buildSystemPortalLoginEmail(hrId),
+    160
+  );
+  let resolvedPassword = generateDefaultPortalPassword(input.mobile, authOptions?.initialPassword);
+  let provisionedUid = `preview-hr-${hrId.toLowerCase()}`;
   let provisioningNote =
-    'Demo Mode: HR profile saved locally without storing any password.';
+    'Preview Mode: HR Portal login credentials generated and ready for testing.';
 
   if (useLiveFirestore(isPreviewSession)) {
-    let backendProvisioned = false;
+    const isolatedResult = await provisionFirebaseUserIsolated({
+      email: resolvedEmail,
+      initialPassword: authOptions?.initialPassword,
+      mobileForDefaultPassword: input.mobile,
+      existingAuthUid: authOptions?.existingAuthUid,
+    });
+    provisionedUid = isolatedResult.uid;
+    resolvedPassword = isolatedResult.passwordUsed;
 
-    if (firebaseAuth?.currentUser) {
-      try {
-        const idToken = await firebaseAuth.currentUser.getIdToken();
-        const response = await fetch('/api/admin/hr-accounts', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            hrId,
-            fullName: sanitizeInput(input.fullName, 120),
-            email: sanitizeInput(input.email.toLowerCase(), 160),
-            mobile: sanitizeInput(input.mobile, 20),
-            assignedBranches: input.assignedBranches,
-            hrDesignation: input.hrDesignation,
-            permissionProfile: input.permissionProfile,
-            permissions,
-            joiningDate: input.joiningDate,
-            accountStatus: input.accountStatus,
-          }),
-        });
-
-        if (response.ok) {
-          const body = (await response.json()) as { uid?: string };
-          if (body.uid) {
-            provisionedUid = body.uid;
-            backendProvisioned = true;
-            try {
-              await sendPasswordResetEmail(firebaseAuth, input.email.trim());
-              provisioningNote = `Firebase Auth user provisioned via trusted backend (${provisionedUid}) and password-setup email dispatched to ${input.email.trim()}.`;
-            } catch {
-              provisioningNote = `Firebase Auth user provisioned (${provisionedUid}) via trusted backend.`;
-            }
-          }
-        }
-      } catch {
-        // Proceed to isolated secondary FirebaseApp Auth provisioning
-      }
-    }
-
-    if (!backendProvisioned) {
-      const isolatedResult = await provisionFirebaseUserIsolated({
-        email: input.email,
-        initialPassword: authOptions?.initialPassword,
-        existingAuthUid: authOptions?.existingAuthUid,
-      });
-      provisionedUid = isolatedResult.uid;
-
-      if (isolatedResult.mode === 'linked_existing') {
-        provisioningNote = `Linked existing Firebase Auth account (${provisionedUid}) and activated HR Portal access.`;
-      } else if ((authOptions?.initialPassword ?? '').trim().length >= 6) {
-        provisioningNote = `Firebase Auth account created (${provisionedUid}) and HR Portal login enabled immediately.`;
-      } else if (isolatedResult.passwordResetSent) {
-        provisioningNote = `Firebase Auth account created (${provisionedUid}) and password-setup email sent to ${input.email.trim()}.`;
-      } else {
-        provisioningNote = `Firebase Auth account created (${provisionedUid}). Use "Forgot Password?" on HR Portal to set a password.`;
-      }
+    if (isolatedResult.mode === 'linked_existing') {
+      provisioningNote = `Linked existing Firebase Auth account (${provisionedUid}) and activated HR Portal access.`;
+    } else {
+      provisioningNote = `HR Portal login (${isolatedResult.emailUsed}) created and ready for immediate sign-in.`;
     }
   }
 
@@ -1941,7 +1864,7 @@ export async function createHRProfileAccount(
     hrId,
     uid: provisionedUid,
     fullName: sanitizeInput(input.fullName, 120),
-    email: sanitizeInput(input.email.toLowerCase(), 160),
+    email: resolvedEmail,
     mobile: sanitizeInput(input.mobile, 20),
     profilePhoto: photoUrl,
     assignedBranches: input.assignedBranches,
@@ -1963,6 +1886,20 @@ export async function createHRProfileAccount(
     ],
   };
 
+  const hrPortalMeta = getPortalByRole('hr');
+  const issuedCredentials: IssuedPortalCredentials = {
+    role: 'hr',
+    portalName: hrPortalMeta.portalName,
+    loginPath: hrPortalMeta.loginPath,
+    systemId: hrId,
+    fullName: record.fullName,
+    loginEmail: record.email,
+    loginPassword: resolvedPassword,
+    uid: provisionedUid,
+    branchLabel: input.assignedBranches.join(', '),
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
+
   const summary = `Created HR account ${hrId} (${record.fullName} · ${record.hrDesignation}) assigned to ${input.assignedBranches.join(', ')}.`;
 
   if (!useLiveFirestore(isPreviewSession)) {
@@ -1976,7 +1913,27 @@ export async function createHRProfileAccount(
       summary,
     });
     writeLocalStore(store);
-    return { record, provisioningNote };
+
+    upsertPreviewProvisionedUser({
+      uid: provisionedUid,
+      systemId: hrId,
+      fullName: record.fullName,
+      email: record.email,
+      phone: record.mobile,
+      ...(photoUrl ? { profilePhoto: photoUrl } : {}),
+      designationLabel: record.hrDesignation,
+      initialAccessKey: resolvedPassword,
+      role: 'hr',
+      branchId: input.assignedBranches[0] || 'HQ',
+      assignedBranches: input.assignedBranches,
+      assignedSiteIds: [],
+      permissions,
+      isActive: input.accountStatus === 'Active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    return { record, provisioningNote, issuedCredentials };
   }
 
   const path = `hrProfiles/${hrId}`;
@@ -1986,9 +1943,13 @@ export async function createHRProfileAccount(
     if (provisionedUid && !provisionedUid.startsWith('pending-auth-')) {
       batch.set(doc(firestoreDb!, 'users', provisionedUid), {
         uid: provisionedUid,
-        fullName: sanitizeInput(input.fullName, 120),
-        email: sanitizeInput(input.email.toLowerCase(), 160),
-        phone: sanitizeInput(input.mobile, 20),
+        systemId: hrId,
+        fullName: record.fullName,
+        email: record.email,
+        phone: record.mobile,
+        ...(photoUrl ? { profilePhoto: photoUrl } : {}),
+        designationLabel: record.hrDesignation,
+        initialAccessKey: resolvedPassword,
         role: 'hr',
         branchId: input.assignedBranches[0],
         assignedBranches: input.assignedBranches,
@@ -2020,10 +1981,81 @@ export async function createHRProfileAccount(
 
     await batch.commit();
     notifyListeners();
-    return { record, provisioningNote };
+    return { record, provisioningNote, issuedCredentials };
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
+}
+
+export async function getIssuedCredentialsForHR(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  hr: HRProfileRecord
+): Promise<IssuedPortalCredentials> {
+  if (caller.role !== 'admin') {
+    throw new Error('Only System Administrators can view HR portal credentials.');
+  }
+  const hrPortal = getPortalByRole('hr');
+  let uid = hr.uid;
+  let loginEmail = hr.email || buildSystemPortalLoginEmail(hr.hrId);
+  let loginPassword = generateDefaultPortalPassword(hr.mobile);
+
+  const existingUserDoc =
+    uid && !uid.startsWith('pending-auth-')
+      ? await getPortalUserByUid(caller, uid, isPreviewSession)
+      : null;
+
+  if (existingUserDoc) {
+    loginEmail = existingUserDoc.email || loginEmail;
+    loginPassword = existingUserDoc.initialAccessKey || loginPassword;
+  } else if (useLiveFirestore(isPreviewSession)) {
+    // On-demand provision if an older HR record had pending-auth UID
+    const isolated = await provisionFirebaseUserIsolated({
+      email: loginEmail,
+      mobileForDefaultPassword: hr.mobile,
+    });
+    uid = isolated.uid;
+    loginEmail = isolated.emailUsed;
+    loginPassword = isolated.passwordUsed;
+    const nowIso = new Date().toISOString();
+    await setDoc(doc(firestoreDb!, 'users', uid), {
+      uid,
+      systemId: hr.hrId,
+      fullName: hr.fullName,
+      email: loginEmail,
+      phone: hr.mobile,
+      ...(hr.profilePhoto ? { profilePhoto: hr.profilePhoto } : {}),
+      designationLabel: hr.hrDesignation,
+      initialAccessKey: loginPassword,
+      role: 'hr',
+      branchId: hr.assignedBranches[0] || 'HQ',
+      assignedBranches: hr.assignedBranches,
+      assignedSiteIds: [],
+      permissions: hr.permissions,
+      isActive: hr.accountStatus === 'Active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await updateDoc(doc(firestoreDb!, 'hrProfiles', hr.hrId), {
+      uid,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    notifyListeners();
+  }
+
+  return {
+    role: 'hr',
+    portalName: hrPortal.portalName,
+    loginPath: hrPortal.loginPath,
+    systemId: hr.hrId,
+    fullName: hr.fullName,
+    loginEmail,
+    loginPassword,
+    uid,
+    branchLabel: hr.assignedBranches.join(', '),
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
 }
 
 export async function updateHRProfileAccount(
@@ -2127,6 +2159,8 @@ export async function updateHRProfileAccount(
         batch.update(userRef, {
           fullName: sanitizeInput(input.fullName, 120),
           phone: sanitizeInput(input.mobile, 20),
+          ...(photoUrl ? { profilePhoto: photoUrl } : {}),
+          designationLabel: input.hrDesignation,
           branchId: input.assignedBranches[0] || current.assignedBranches[0],
           assignedBranches: input.assignedBranches,
           permissions: resolvedPermissions,
@@ -2776,11 +2810,28 @@ export async function listSites(
   }
 }
 
+export async function uploadSitePhoto(
+  siteId: string,
+  file: File,
+  isPreviewSession: boolean
+): Promise<string> {
+  return processInstantPhotoAsset(file, {
+    storagePath: `sites/${siteId || 'NEW_SITE'}/photo_${Date.now()}.jpg`,
+    tryCloudStorage: useLiveFirestore(isPreviewSession),
+    maxDimension: 360,
+  });
+}
+
+export interface CreateSiteAuthOptions {
+  initialPassword?: string;
+}
+
 export async function createSiteRecord(
   caller: RexonUser,
   isPreviewSession: boolean,
-  input: SiteFormInput
-): Promise<SiteRecord> {
+  input: SiteFormInput,
+  authOptions?: CreateSiteAuthOptions
+): Promise<SiteRecord & { issuedCredentials?: IssuedPortalCredentials }> {
   if (!hasUserPermission(caller, 'site.create')) {
     throw new Error('Your HR permission profile does not grant Site creation access (site.create).');
   }
@@ -2804,9 +2855,36 @@ export async function createSiteRecord(
   );
   const nowIso = new Date().toISOString();
 
+  const rawManagerEmail = input.managerEmail.trim().toLowerCase();
+  let sitePortalEmail = sanitizeInput(
+    rawManagerEmail || buildSystemPortalLoginEmail(siteId),
+    160
+  );
+  let sitePortalPassword = generateDefaultPortalPassword(
+    input.managerMobile,
+    authOptions?.initialPassword
+  );
+  let sitePortalUid = `preview-site-${siteId.toLowerCase()}`;
+
+  if (useLiveFirestore(isPreviewSession)) {
+    const isolated = await provisionFirebaseUserIsolated({
+      email: sitePortalEmail,
+      initialPassword: authOptions?.initialPassword,
+      mobileForDefaultPassword: input.managerMobile,
+    });
+    sitePortalUid = isolated.uid;
+    sitePortalEmail = isolated.emailUsed;
+    sitePortalPassword = isolated.passwordUsed;
+  }
+
+  const sitePhoto = input.sitePhoto || '';
+
   const record: SiteRecord = {
     siteId,
     siteName: sanitizeInput(input.siteName, 140),
+    ...(sitePhoto ? { sitePhoto } : {}),
+    sitePortalUid,
+    sitePortalEmail,
     clientId: input.clientId,
     clientName: sanitizeInput(input.clientName, 150),
     branchId: input.branchId,
@@ -2819,7 +2897,7 @@ export async function createSiteRecord(
     siteContactPerson: sanitizeInput(input.siteContactPerson, 100),
     siteManagerName: sanitizeInput(input.siteManagerName, 100),
     managerMobile: sanitizeInput(input.managerMobile, 20),
-    managerEmail: sanitizeInput(input.managerEmail.toLowerCase(), 160),
+    managerEmail: sitePortalEmail,
     startDate: input.startDate,
     contractEndDate: input.contractEndDate,
     siteStatus: input.siteStatus,
@@ -2839,7 +2917,22 @@ export async function createSiteRecord(
     ],
   };
 
-  const summary = `Created Site ${siteId} (${record.siteName}) under Client ${record.clientName} (${record.clientId}).`;
+  const sitePortalMeta = getPortalByRole('site');
+  const issuedCredentials: IssuedPortalCredentials = {
+    role: 'site',
+    portalName: sitePortalMeta.portalName,
+    loginPath: sitePortalMeta.loginPath,
+    systemId: siteId,
+    fullName: `${record.siteManagerName} (${record.siteName})`,
+    loginEmail: sitePortalEmail,
+    loginPassword: sitePortalPassword,
+    uid: sitePortalUid,
+    branchLabel: record.branchId,
+    siteLabel: `${siteId} — ${record.siteName}`,
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
+
+  const summary = `Created Site ${siteId} (${record.siteName}) under Client ${record.clientName} (${record.clientId}) with Site Portal Login ${sitePortalEmail}.`;
 
   if (!useLiveFirestore(isPreviewSession)) {
     const store = readLocalStore();
@@ -2852,12 +2945,55 @@ export async function createSiteRecord(
       summary,
     });
     writeLocalStore(store);
-    return record;
+
+    upsertPreviewProvisionedUser({
+      uid: sitePortalUid,
+      systemId: siteId,
+      fullName: record.siteManagerName,
+      email: sitePortalEmail,
+      phone: record.managerMobile,
+      ...(sitePhoto ? { profilePhoto: sitePhoto } : {}),
+      designationLabel: `Site Manager — ${record.siteName}`,
+      initialAccessKey: sitePortalPassword,
+      role: 'site',
+      branchId: record.branchId,
+      assignedBranches: [record.branchId],
+      assignedSiteIds: [siteId],
+      permissions: [],
+      isActive: record.siteStatus === 'Active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    return { ...record, issuedCredentials };
   }
 
   const path = `sites/${siteId}`;
   try {
     const batch = writeBatch(firestoreDb!);
+    const siteUserDoc = {
+      uid: sitePortalUid,
+      systemId: siteId,
+      fullName: record.siteManagerName,
+      email: sitePortalEmail,
+      phone: record.managerMobile,
+      ...(sitePhoto ? { profilePhoto: sitePhoto } : {}),
+      designationLabel: sanitizeInput(`Site Manager — ${record.siteName}`, 120),
+      initialAccessKey: sitePortalPassword,
+      role: 'site',
+      branchId: record.branchId,
+      assignedBranches: [record.branchId],
+      assignedSiteIds: [siteId],
+      permissions: [],
+      isActive: record.siteStatus === 'Active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (caller.role === 'admin') {
+      batch.set(doc(firestoreDb!, 'users', sitePortalUid), siteUserDoc);
+    }
+
     batch.set(doc(firestoreDb!, 'sites', siteId), {
       ...record,
       serverUpdatedAt: serverTimestamp(),
@@ -2875,11 +3011,94 @@ export async function createSiteRecord(
       createdAt: serverTimestamp(),
     });
     await batch.commit();
+
+    if (caller.role !== 'admin') {
+      try {
+        await setDoc(doc(firestoreDb!, 'users', sitePortalUid), siteUserDoc);
+      } catch {
+        // Non-fatal if older deployed Firestore rules require Admin to finalize Site Portal role doc
+      }
+    }
+
     notifyListeners();
-    return record;
+    return { ...record, issuedCredentials };
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, path);
   }
+}
+
+export async function getIssuedCredentialsForSite(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  site: SiteRecord
+): Promise<IssuedPortalCredentials> {
+  if (caller.role !== 'admin' && !hasUserPermission(caller, 'site.create')) {
+    throw new Error('Unauthorized to inspect Site Portal credentials.');
+  }
+  const sitePortal = getPortalByRole('site');
+  let uid = site.sitePortalUid || '';
+  let loginEmail =
+    site.sitePortalEmail ||
+    site.managerEmail?.trim().toLowerCase() ||
+    buildSystemPortalLoginEmail(site.siteId);
+  let loginPassword = generateDefaultPortalPassword(site.managerMobile);
+
+  const existingUserDoc = uid
+    ? await getPortalUserByUid(caller, uid, isPreviewSession)
+    : null;
+
+  if (existingUserDoc) {
+    loginEmail = existingUserDoc.email || loginEmail;
+    loginPassword = existingUserDoc.initialAccessKey || loginPassword;
+  } else if (useLiveFirestore(isPreviewSession) && caller.role === 'admin') {
+    const isolated = await provisionFirebaseUserIsolated({
+      email: loginEmail,
+      mobileForDefaultPassword: site.managerMobile,
+    });
+    uid = isolated.uid;
+    loginEmail = isolated.emailUsed;
+    loginPassword = isolated.passwordUsed;
+    const nowIso = new Date().toISOString();
+    await setDoc(doc(firestoreDb!, 'users', uid), {
+      uid,
+      systemId: site.siteId,
+      fullName: site.siteManagerName || site.siteName,
+      email: loginEmail,
+      phone: site.managerMobile,
+      ...(site.sitePhoto ? { profilePhoto: site.sitePhoto } : {}),
+      designationLabel: sanitizeInput(`Site Manager — ${site.siteName}`, 120),
+      initialAccessKey: loginPassword,
+      role: 'site',
+      branchId: site.branchId,
+      assignedBranches: [site.branchId],
+      assignedSiteIds: [site.siteId],
+      permissions: [],
+      isActive: site.siteStatus === 'Active',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await updateDoc(doc(firestoreDb!, 'sites', site.siteId), {
+      sitePortalUid: uid,
+      sitePortalEmail: loginEmail,
+      updatedAt: nowIso,
+      serverUpdatedAt: serverTimestamp(),
+    });
+    notifyListeners();
+  }
+
+  return {
+    role: 'site',
+    portalName: sitePortal.portalName,
+    loginPath: sitePortal.loginPath,
+    systemId: site.siteId,
+    fullName: `${site.siteManagerName} (${site.siteName})`,
+    loginEmail,
+    loginPassword,
+    uid: uid || `site-${site.siteId.toLowerCase()}`,
+    branchLabel: site.branchId,
+    siteLabel: `${site.siteId} — ${site.siteName}`,
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
 }
 
 export async function updateSiteRecord(
@@ -2903,6 +3122,15 @@ export async function updateSiteRecord(
     throw new Error(validation.error ?? 'Site validation failed.');
   }
 
+  const targetSite = existingSites.find((s) => s.siteId === siteId);
+  const resolvedEmail = sanitizeInput(
+    input.managerEmail.trim().toLowerCase() ||
+      targetSite?.sitePortalEmail ||
+      buildSystemPortalLoginEmail(siteId),
+    160
+  );
+  const sitePhoto = input.sitePhoto ?? targetSite?.sitePhoto ?? '';
+
   const nowIso = new Date().toISOString();
   const summary = `Updated Site ${siteId} (${input.siteName}) · Status: ${input.siteStatus}.`;
 
@@ -2913,6 +3141,7 @@ export async function updateSiteRecord(
         ? {
             ...s,
             siteName: sanitizeInput(input.siteName, 140),
+            ...(sitePhoto ? { sitePhoto } : { sitePhoto: '' }),
             clientId: input.clientId,
             clientName: sanitizeInput(input.clientName, 150),
             branchId: input.branchId,
@@ -2925,7 +3154,7 @@ export async function updateSiteRecord(
             siteContactPerson: sanitizeInput(input.siteContactPerson, 100),
             siteManagerName: sanitizeInput(input.siteManagerName, 100),
             managerMobile: sanitizeInput(input.managerMobile, 20),
-            managerEmail: sanitizeInput(input.managerEmail.toLowerCase(), 160),
+            managerEmail: resolvedEmail,
             startDate: input.startDate,
             contractEndDate: input.contractEndDate,
             siteStatus: input.siteStatus,
@@ -2963,6 +3192,7 @@ export async function updateSiteRecord(
     const batch = writeBatch(firestoreDb!);
     batch.update(doc(firestoreDb!, 'sites', siteId), {
       siteName: sanitizeInput(input.siteName, 140),
+      sitePhoto,
       clientId: input.clientId,
       clientName: sanitizeInput(input.clientName, 150),
       branchId: input.branchId,
@@ -2975,7 +3205,7 @@ export async function updateSiteRecord(
       siteContactPerson: sanitizeInput(input.siteContactPerson, 100),
       siteManagerName: sanitizeInput(input.siteManagerName, 100),
       managerMobile: sanitizeInput(input.managerMobile, 20),
-      managerEmail: sanitizeInput(input.managerEmail.toLowerCase(), 160),
+      managerEmail: resolvedEmail,
       startDate: input.startDate,
       contractEndDate: input.contractEndDate,
       siteStatus: input.siteStatus,
@@ -2996,6 +3226,24 @@ export async function updateSiteRecord(
       createdAt: serverTimestamp(),
     });
     await batch.commit();
+
+    if (targetSite?.sitePortalUid && caller.role === 'admin') {
+      try {
+        await updateDoc(doc(firestoreDb!, 'users', targetSite.sitePortalUid), {
+          fullName: sanitizeInput(input.siteManagerName, 100),
+          phone: sanitizeInput(input.managerMobile, 20),
+          ...(sitePhoto ? { profilePhoto: sitePhoto } : {}),
+          branchId: input.branchId,
+          assignedBranches: [input.branchId],
+          assignedSiteIds: [siteId],
+          isActive: input.siteStatus === 'Active',
+          updatedAt: nowIso,
+        });
+      } catch {
+        // Non-fatal if site portal user doc was not yet created
+      }
+    }
+
     notifyListeners();
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
@@ -4779,3 +5027,437 @@ export async function listAuditLogs(
     handleFirestoreError(err, OperationType.LIST, path);
   }
 }
+
+// ============================================================================
+// 10. FIELD OFFICER MANAGEMENT (`users` COLLECTION WITH `role == 'field_officer'`)
+// ============================================================================
+function mapUserToFieldOfficerRecord(u: RexonUser, indexHint = 1): FieldOfficerRecord {
+  const fallbackId = `FO-2026-${String(indexHint).padStart(4, '0')}`;
+  return {
+    fieldOfficerId: u.systemId || fallbackId,
+    uid: u.uid,
+    fullName: u.fullName,
+    email: u.email,
+    phone: u.phone,
+    profilePhoto: u.profilePhoto || '',
+    designationLabel: u.designationLabel || 'Field Officer',
+    branchId: u.branchId,
+    assignedBranches:
+      u.assignedBranches && u.assignedBranches.length > 0 ? u.assignedBranches : [u.branchId],
+    assignedSiteIds: u.assignedSiteIds || [],
+    isActive: u.isActive,
+    ...(u.initialAccessKey ? { initialAccessKey: u.initialAccessKey } : {}),
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+  };
+}
+
+export async function uploadFieldOfficerPhoto(
+  foRefId: string,
+  file: File,
+  isPreviewSession: boolean
+): Promise<string> {
+  return processInstantPhotoAsset(file, {
+    storagePath: `field_officers/${foRefId || 'NEW_FO'}/photo_${Date.now()}.jpg`,
+    tryCloudStorage: useLiveFirestore(isPreviewSession),
+    maxDimension: 280,
+  });
+}
+
+export async function listFieldOfficers(
+  caller: RexonUser,
+  isPreviewSession: boolean
+): Promise<FieldOfficerRecord[]> {
+  if (caller.role === 'site' || caller.role === 'employee') {
+    return [];
+  }
+
+  const authorizedBranches = getAuthorizedBranchIds(caller);
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    const customPreview = listPreviewProvisionedUsers()
+      .filter((u) => u.role === 'field_officer')
+      .map((u, idx) => mapUserToFieldOfficerRecord(u, idx + 2));
+
+    const demoFo = DEMO_ACCOUNTS.field_officer;
+    const hasDemoOverride = customPreview.some(
+      (f) => f.uid === 'demo-field_officer-001' || f.email.toLowerCase() === demoFo.email.toLowerCase()
+    );
+    const seedRecord: FieldOfficerRecord[] = hasDemoOverride
+      ? []
+      : [
+          {
+            fieldOfficerId: 'FO-2026-0001',
+            uid: 'demo-field_officer-001',
+            fullName: demoFo.fullName.replace(' (Demo Field Officer)', ''),
+            email: demoFo.email,
+            phone: demoFo.phone,
+            profilePhoto: '',
+            designationLabel: 'Senior Field Officer',
+            branchId: demoFo.branchId,
+            assignedBranches: [demoFo.branchId],
+            assignedSiteIds: demoFo.assignedSiteIds,
+            isActive: true,
+            initialAccessKey: demoFo.password,
+            createdAt: '2026-01-10T09:00:00.000Z',
+            updatedAt: '2026-04-01T09:00:00.000Z',
+          },
+        ];
+
+    const merged = [...customPreview, ...seedRecord];
+    if (caller.role === 'admin') {
+      return merged.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    }
+    if (caller.role === 'field_officer') {
+      return merged.filter((f) => f.uid === caller.uid);
+    }
+    return merged
+      .filter(
+        (f) =>
+          authorizedBranches.includes(f.branchId) ||
+          f.assignedBranches.some((b) => authorizedBranches.includes(b))
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  const path = 'users';
+  try {
+    let q;
+    if (caller.role === 'admin') {
+      q = query(collection(firestoreDb!, 'users'), where('role', '==', 'field_officer'));
+    } else if (caller.role === 'field_officer') {
+      const selfSnap = await getDoc(doc(firestoreDb!, 'users', caller.uid));
+      if (!selfSnap.exists()) return [];
+      const parsed = parseFirestoreUserDocument(
+        selfSnap.id,
+        selfSnap.data() as Record<string, unknown>
+      );
+      return [mapUserToFieldOfficerRecord(parsed, 1)];
+    } else {
+      if (authorizedBranches.length === 0) return [];
+      q = query(
+        collection(firestoreDb!, 'users'),
+        where('role', '==', 'field_officer'),
+        where('branchId', 'in', authorizedBranches.slice(0, 10))
+      );
+    }
+
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d, idx) =>
+        mapUserToFieldOfficerRecord(
+          parseFirestoreUserDocument(d.id, d.data() as Record<string, unknown>),
+          idx + 1
+        )
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, path);
+    return [];
+  }
+}
+
+export async function createFieldOfficerAccount(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  input: FieldOfficerFormInput
+): Promise<{
+  record: FieldOfficerRecord;
+  issuedCredentials: IssuedPortalCredentials;
+}> {
+  if (
+    caller.role !== 'admin' &&
+    !(caller.role === 'hr' && hasUserPermission(caller, 'employee.manage'))
+  ) {
+    throw new Error(
+      'Creating a Field Officer account requires System Administrator authority or HR employee.manage permission.'
+    );
+  }
+
+  const existing = await listFieldOfficers(caller, isPreviewSession);
+  const validation = validateFieldOfficerForm(input, existing);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Field Officer validation failed.');
+  }
+
+  const assignedBranches =
+    input.assignedBranches.length > 0 ? input.assignedBranches : [input.branchId];
+  const primaryBranch = input.branchId || assignedBranches[0] || 'HQ';
+
+  if (caller.role === 'hr') {
+    const allowed = getAuthorizedBranchIds(caller);
+    if (!allowed.includes(primaryBranch)) {
+      throw new Error('HR users can only register Field Officers within their assigned branch(es).');
+    }
+  }
+
+  const fieldOfficerId = generateNextId(
+    'FO',
+    existing.map((f) => f.fieldOfficerId)
+  );
+  const nowIso = new Date().toISOString();
+
+  let resolvedEmail = sanitizeInput(
+    input.email.trim() ? input.email.toLowerCase() : buildSystemPortalLoginEmail(fieldOfficerId),
+    160
+  );
+  let resolvedPassword = generateDefaultPortalPassword(input.phone, input.initialPassword);
+  let provisionedUid = `preview-fo-${fieldOfficerId.toLowerCase()}`;
+
+  if (useLiveFirestore(isPreviewSession)) {
+    const isolated = await provisionFirebaseUserIsolated({
+      email: resolvedEmail,
+      initialPassword: input.initialPassword,
+      mobileForDefaultPassword: input.phone,
+    });
+    provisionedUid = isolated.uid;
+    resolvedEmail = isolated.emailUsed;
+    resolvedPassword = isolated.passwordUsed;
+  }
+
+  const cleanSites = Array.from(new Set(input.assignedSiteIds.filter(Boolean))).slice(0, 50);
+  const cleanPhoto = input.profilePhoto || '';
+  const cleanDesignation = sanitizeInput(input.designationLabel || 'Field Officer', 100);
+
+  const record: FieldOfficerRecord = {
+    fieldOfficerId,
+    uid: provisionedUid,
+    fullName: sanitizeInput(input.fullName, 120),
+    email: resolvedEmail,
+    phone: sanitizeInput(input.phone, 20),
+    profilePhoto: cleanPhoto,
+    designationLabel: cleanDesignation,
+    branchId: primaryBranch,
+    assignedBranches,
+    assignedSiteIds: cleanSites,
+    isActive: input.isActive,
+    initialAccessKey: resolvedPassword,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const foPortal = getPortalByRole('field_officer');
+  const issuedCredentials: IssuedPortalCredentials = {
+    role: 'field_officer',
+    portalName: foPortal.portalName,
+    loginPath: foPortal.loginPath,
+    systemId: fieldOfficerId,
+    fullName: record.fullName,
+    loginEmail: record.email,
+    loginPassword: resolvedPassword,
+    uid: provisionedUid,
+    branchLabel: assignedBranches.join(', '),
+    siteLabel: cleanSites.length > 0 ? cleanSites.join(', ') : 'Assigned Branch Sites',
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
+
+  const summary = `Registered Field Officer ${fieldOfficerId} (${record.fullName}) · Branch: ${primaryBranch} · Sites: ${cleanSites.length || 'Branch Scope'}.`;
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    upsertPreviewProvisionedUser({
+      uid: provisionedUid,
+      systemId: fieldOfficerId,
+      fullName: record.fullName,
+      email: record.email,
+      phone: record.phone,
+      ...(cleanPhoto ? { profilePhoto: cleanPhoto } : {}),
+      designationLabel: cleanDesignation,
+      initialAccessKey: resolvedPassword,
+      role: 'field_officer',
+      branchId: primaryBranch,
+      assignedBranches,
+      assignedSiteIds: cleanSites,
+      permissions: [],
+      isActive: record.isActive,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    const store = readLocalStore();
+    appendLocalAudit(store, caller, {
+      action: 'Field Officer Created',
+      module: 'Employee',
+      recordId: fieldOfficerId,
+      branchId: primaryBranch,
+      summary,
+    });
+    writeLocalStore(store);
+    return { record, issuedCredentials };
+  }
+
+  const path = `users/${provisionedUid}`;
+  try {
+    const batch = writeBatch(firestoreDb!);
+    batch.set(doc(firestoreDb!, 'users', provisionedUid), {
+      uid: provisionedUid,
+      systemId: fieldOfficerId,
+      fullName: record.fullName,
+      email: record.email,
+      phone: record.phone,
+      ...(cleanPhoto ? { profilePhoto: cleanPhoto } : {}),
+      designationLabel: cleanDesignation,
+      initialAccessKey: resolvedPassword,
+      role: 'field_officer',
+      branchId: primaryBranch,
+      assignedBranches,
+      assignedSiteIds: cleanSites,
+      permissions: [],
+      isActive: record.isActive,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    const logId = makeRuntimeLogId();
+    batch.set(doc(firestoreDb!, 'auditLogs', logId), {
+      ...buildAuditLogObject(caller, {
+        logId,
+        action: 'Field Officer Created',
+        module: 'Employee',
+        recordId: fieldOfficerId,
+        branchId: primaryBranch,
+        summary,
+      }),
+      createdAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+    notifyListeners();
+    return { record, issuedCredentials };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+  }
+}
+
+export async function updateFieldOfficerAccount(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  uid: string,
+  input: FieldOfficerFormInput
+): Promise<void> {
+  if (
+    caller.role !== 'admin' &&
+    !(caller.role === 'hr' && hasUserPermission(caller, 'employee.manage'))
+  ) {
+    throw new Error('Updating Field Officer accounts requires Administrator or HR employee.manage permission.');
+  }
+
+  const existing = await listFieldOfficers(caller, isPreviewSession);
+  const target = existing.find((f) => f.uid === uid);
+  if (!target) {
+    throw new Error('Field Officer record not found.');
+  }
+
+  const validation = validateFieldOfficerForm(input, existing, uid);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? 'Field Officer validation failed.');
+  }
+
+  const assignedBranches =
+    input.assignedBranches.length > 0 ? input.assignedBranches : [input.branchId];
+  const primaryBranch = input.branchId || assignedBranches[0] || target.branchId;
+  const cleanSites = Array.from(new Set(input.assignedSiteIds.filter(Boolean))).slice(0, 50);
+  const cleanPhoto = input.profilePhoto || '';
+  const cleanDesignation = sanitizeInput(input.designationLabel || 'Field Officer', 100);
+  const nowIso = new Date().toISOString();
+
+  if (!useLiveFirestore(isPreviewSession)) {
+    upsertPreviewProvisionedUser({
+      uid,
+      systemId: target.fieldOfficerId,
+      fullName: sanitizeInput(input.fullName, 120),
+      email: target.email,
+      phone: sanitizeInput(input.phone, 20),
+      ...(cleanPhoto ? { profilePhoto: cleanPhoto } : { profilePhoto: '' }),
+      designationLabel: cleanDesignation,
+      ...(target.initialAccessKey ? { initialAccessKey: target.initialAccessKey } : {}),
+      role: 'field_officer',
+      branchId: primaryBranch,
+      assignedBranches,
+      assignedSiteIds: cleanSites,
+      permissions: [],
+      isActive: input.isActive,
+      createdAt: target.createdAt,
+      updatedAt: nowIso,
+    });
+    notifyListeners();
+    return;
+  }
+
+  const path = `users/${uid}`;
+  try {
+    await updateDoc(doc(firestoreDb!, 'users', uid), {
+      fullName: sanitizeInput(input.fullName, 120),
+      phone: sanitizeInput(input.phone, 20),
+      profilePhoto: cleanPhoto,
+      designationLabel: cleanDesignation,
+      branchId: primaryBranch,
+      assignedBranches,
+      assignedSiteIds: cleanSites,
+      isActive: input.isActive,
+      updatedAt: nowIso,
+    });
+    notifyListeners();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function toggleFieldOfficerStatus(
+  caller: RexonUser,
+  isPreviewSession: boolean,
+  uid: string,
+  nextActive: boolean
+): Promise<void> {
+  if (
+    caller.role !== 'admin' &&
+    !(caller.role === 'hr' && hasUserPermission(caller, 'employee.manage'))
+  ) {
+    throw new Error('Changing Field Officer status requires Administrator authority.');
+  }
+
+  const nowIso = new Date().toISOString();
+  if (!useLiveFirestore(isPreviewSession)) {
+    const existing = listPreviewProvisionedUsers().find((u) => u.uid === uid);
+    if (existing) {
+      upsertPreviewProvisionedUser({
+        ...existing,
+        isActive: nextActive,
+        updatedAt: nowIso,
+      });
+    }
+    notifyListeners();
+    return;
+  }
+
+  const path = `users/${uid}`;
+  try {
+    await updateDoc(doc(firestoreDb!, 'users', uid), {
+      isActive: nextActive,
+      updatedAt: nowIso,
+    });
+    notifyListeners();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export function buildFieldOfficerCredentialsView(
+  fo: FieldOfficerRecord,
+  isPreviewSession: boolean
+): IssuedPortalCredentials {
+  const foPortal = getPortalByRole('field_officer');
+  return {
+    role: 'field_officer',
+    portalName: foPortal.portalName,
+    loginPath: foPortal.loginPath,
+    systemId: fo.fieldOfficerId,
+    fullName: fo.fullName,
+    loginEmail: fo.email || buildSystemPortalLoginEmail(fo.fieldOfficerId),
+    loginPassword: fo.initialAccessKey || generateDefaultPortalPassword(fo.phone),
+    uid: fo.uid,
+    branchLabel: fo.assignedBranches.join(', '),
+    siteLabel: fo.assignedSiteIds.length > 0 ? fo.assignedSiteIds.join(', ') : 'Assigned Branch Sites',
+    isPreviewMode: !useLiveFirestore(isPreviewSession),
+  };
+}
+

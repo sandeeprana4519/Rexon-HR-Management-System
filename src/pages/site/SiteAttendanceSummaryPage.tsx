@@ -4,6 +4,8 @@ import {
   Clock,
   Download,
   FileSpreadsheet,
+  FileText,
+  Printer,
   ShieldCheck,
   UserCheck,
   UserMinus,
@@ -19,6 +21,7 @@ import {
 import { subscribeDeploymentData } from '../../services/firestore/assignmentService';
 import { formatServiceErrorMessage } from '../../services/firestore/errorHandler';
 import { SanitizedSiteAttendanceSummaryRecord } from '../../types';
+import { exportBrandedAttendancePdf } from '../../utils/attendancePdfExport';
 import {
   exportTableToCsv,
   exportTableToExcelXml,
@@ -29,8 +32,10 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
   const { user, isPreviewSession } = useAuth();
   const today = useMemo(() => getTodayIsoDate(), []);
 
+  const [periodMode, setPeriodMode] = useState<'daily' | 'monthly'>('daily');
   const [selectedDate, setSelectedDate] = useState<string>(today);
-  const [summaries, setSummaries] = useState<SanitizedSiteAttendanceSummaryRecord[]>([]);
+  const [selectedMonth, setSelectedMonth] = useState<string>(today.slice(0, 7));
+  const [allSummaries, setAllSummaries] = useState<SanitizedSiteAttendanceSummaryRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -39,14 +44,18 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const list = await getSitePortalAttendanceSummaries(user, isPreviewSession, selectedDate);
-      setSummaries(list);
+      const list = await getSitePortalAttendanceSummaries(
+        user,
+        isPreviewSession,
+        periodMode === 'daily' ? selectedDate : undefined
+      );
+      setAllSummaries(list);
     } catch (err) {
       setErrorMsg(formatServiceErrorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [user, isPreviewSession, selectedDate]);
+  }, [user, isPreviewSession, periodMode, selectedDate]);
 
   useEffect(() => {
     void loadSummaries();
@@ -58,10 +67,67 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
     };
   }, [loadSummaries]);
 
+  const summaries = useMemo(() => {
+    if (periodMode === 'daily') {
+      return allSummaries.filter((s) => s.attendanceDate === selectedDate);
+    }
+    return allSummaries.filter((s) => s.attendanceDate.startsWith(selectedMonth));
+  }, [allSummaries, periodMode, selectedDate, selectedMonth]);
+
+  // Monthly site-wise rollup (headcount-only, zero PII)
+  const monthlySiteRollups = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        siteId: string;
+        siteName: string;
+        clientName: string;
+        daysReported: number;
+        sanctionedPeak: number;
+        totalDeployedManDays: number;
+        totalPresentManDays: number;
+        totalLateManDays: number;
+        totalHalfDayManDays: number;
+        totalAbsentManDays: number;
+        totalWeeklyOffManDays: number;
+      }
+    >();
+
+    for (const s of summaries) {
+      const cur = map.get(s.siteId) ?? {
+        siteId: s.siteId,
+        siteName: s.siteName,
+        clientName: s.clientName,
+        daysReported: 0,
+        sanctionedPeak: 0,
+        totalDeployedManDays: 0,
+        totalPresentManDays: 0,
+        totalLateManDays: 0,
+        totalHalfDayManDays: 0,
+        totalAbsentManDays: 0,
+        totalWeeklyOffManDays: 0,
+      };
+      cur.daysReported += 1;
+      cur.sanctionedPeak = Math.max(cur.sanctionedPeak, s.totalSanctioned);
+      cur.totalDeployedManDays += s.totalDeployed;
+      cur.totalPresentManDays += s.presentCount + s.lateCount + s.halfDayCount;
+      cur.totalLateManDays += s.lateCount;
+      cur.totalHalfDayManDays += s.halfDayCount;
+      cur.totalAbsentManDays += s.absentCount;
+      cur.totalWeeklyOffManDays += s.weeklyOffCount + s.leaveCount;
+      map.set(s.siteId, cur);
+    }
+
+    return Array.from(map.values());
+  }, [summaries]);
+
   const totals = useMemo(() => {
     return summaries.reduce(
       (acc, s) => ({
-        sanctioned: acc.sanctioned + s.totalSanctioned,
+        sanctioned:
+          periodMode === 'daily'
+            ? acc.sanctioned + s.totalSanctioned
+            : Math.max(acc.sanctioned, s.totalSanctioned),
         deployed: acc.deployed + s.totalDeployed,
         present: acc.present + s.presentCount + s.lateCount + s.halfDayCount,
         late: acc.late + s.lateCount,
@@ -70,9 +136,9 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
       }),
       { sanctioned: 0, deployed: 0, present: 0, late: 0, absent: 0, offOrLeave: 0 }
     );
-  }, [summaries]);
+  }, [summaries, periodMode]);
 
-  const handleExport = (format: 'csv' | 'excel') => {
+  const buildSanitizedExportRows = () => {
     const headers = [
       'Site ID',
       'Site Name',
@@ -108,6 +174,11 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
         ]);
       }
     }
+    return { headers, rows };
+  };
+
+  const handleExport = (format: 'csv' | 'excel') => {
+    const { headers, rows } = buildSanitizedExportRows();
     if (format === 'csv') {
       exportTableToCsv('site-turnout-headcount-summary', headers, rows);
     } else {
@@ -120,46 +191,157 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
     }
   };
 
+  const handleBrandedPdfExport = (mode: 'print' | 'download') => {
+    const { rows } = buildSanitizedExportRows();
+    const firstSite = summaries[0];
+    exportBrandedAttendancePdf(
+      {
+        reportTitle:
+          periodMode === 'daily'
+            ? 'Authorized Daily Site Turnout Summary'
+            : 'Authorized Monthly Site Turnout Summary',
+        reportPeriod: periodMode === 'daily' ? selectedDate : `Month: ${selectedMonth}`,
+        clientName: firstSite?.clientName || 'Authorized Client Site',
+        siteName:
+          summaries.length === 1
+            ? firstSite.siteName
+            : `${monthlySiteRollups.length} Authorized Site(s)`,
+        generatedBy: `${user?.fullName || 'Site Supervisor'} (Site Portal)`,
+        summaryMetrics: [
+          {
+            label: periodMode === 'daily' ? 'Scheduled / Deployed' : 'Deployed Man-Days',
+            value: totals.deployed,
+          },
+          {
+            label: periodMode === 'daily' ? 'Present on Site' : 'Present Man-Days',
+            value: totals.present,
+          },
+          { label: 'Late Arrivals', value: totals.late },
+          { label: 'Absent / Unfilled', value: totals.absent },
+          { label: 'Weekly Off / Leave', value: totals.offOrLeave },
+        ],
+        columns: [
+          { header: 'Site ID' },
+          { header: 'Site Name' },
+          { header: 'Date' },
+          { header: 'Category' },
+          { header: 'Service' },
+          { header: 'Designation' },
+          { header: 'Shift' },
+          { header: 'Deployed', align: 'right' },
+          { header: 'Present', align: 'right' },
+          { header: 'Late', align: 'right' },
+          { header: 'Half Day', align: 'right' },
+          { header: 'Absent', align: 'right' },
+          { header: 'Weekly Off', align: 'right' },
+        ],
+        rows,
+        footerNote:
+          'Client Privacy & Zero-PII Compliance: This statement contains aggregated post and shift headcounts only. Employee personal data, KYC, salary, photos, and GPS coordinates are strictly excluded.',
+        fileNamePrefix: `REXON_Site_Summary_${periodMode === 'daily' ? selectedDate : selectedMonth}`,
+      },
+      mode
+    );
+  };
+
   if (!user) return null;
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#1F1916]">
             Authorized Site Attendance Summary
           </h1>
           <p className="mt-1 text-sm text-[#574B43]">
-            Daily shift-wise and designation-wise headcount turnout for your assigned site(s).
+            Daily and monthly shift-wise and designation-wise headcount turnout for your assigned
+            site(s).
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="date"
-            value={selectedDate}
-            max={today}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="min-h-[42px] px-3 py-2 text-xs font-mono-tabular bg-white border border-[#D4C7B8] rounded-lg text-[#1F1916]"
-          />
+          <div className="inline-flex items-center p-1 bg-white border border-[#D4C7B8] rounded-lg">
+            <button
+              type="button"
+              onClick={() => setPeriodMode('daily')}
+              className={`min-h-[36px] px-3 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                periodMode === 'daily'
+                  ? 'bg-[#5C3D2E] text-white'
+                  : 'text-[#574B43] hover:text-[#1F1916]'
+              }`}
+            >
+              Daily Turnout
+            </button>
+            <button
+              type="button"
+              onClick={() => setPeriodMode('monthly')}
+              className={`min-h-[36px] px-3 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                periodMode === 'monthly'
+                  ? 'bg-[#5C3D2E] text-white'
+                  : 'text-[#574B43] hover:text-[#1F1916]'
+              }`}
+            >
+              Monthly Summary
+            </button>
+          </div>
+
+          {periodMode === 'daily' ? (
+            <input
+              type="date"
+              value={selectedDate}
+              max={today}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="min-h-[44px] px-3 py-2 text-xs font-mono-tabular bg-white border border-[#D4C7B8] rounded-lg text-[#1F1916]"
+            />
+          ) : (
+            <input
+              type="month"
+              value={selectedMonth}
+              max={today.slice(0, 7)}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="min-h-[44px] px-3 py-2 text-xs font-mono-tabular bg-white border border-[#D4C7B8] rounded-lg text-[#1F1916]"
+            />
+          )}
+
+          <button
+            type="button"
+            disabled={summaries.length === 0}
+            onClick={() => handleBrandedPdfExport('print')}
+            className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-45 whitespace-nowrap"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print / Save PDF</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={summaries.length === 0}
+            onClick={() => handleBrandedPdfExport('download')}
+            className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
+          >
+            <FileText className="w-3.5 h-3.5 text-[#5C3D2E]" />
+            <span>Download Statement</span>
+          </button>
+
           <button
             type="button"
             disabled={summaries.length === 0}
             onClick={() => handleExport('csv')}
-            className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
+            className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
           >
             <Download className="w-3.5 h-3.5 text-[#5C3D2E]" />
-            <span>Download CSV</span>
+            <span>CSV</span>
           </button>
+
           <button
             type="button"
             disabled={summaries.length === 0}
             onClick={() => handleExport('excel')}
-            className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-45 whitespace-nowrap"
+            className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5" />
-            <span>Export Excel</span>
+            <FileSpreadsheet className="w-3.5 h-3.5 text-[#5C3D2E]" />
+            <span>Excel</span>
           </button>
         </div>
       </div>
@@ -170,7 +352,8 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
         <span>
           Client Privacy &amp; Data Isolation: This portal provides aggregated post, shift, and
           service headcounts only. Individual employee names, phone numbers, Aadhaar/PAN, bank
-          accounts, salary figures, and raw GPS coordinates are strictly excluded.
+          accounts, salary figures, verification photos, and raw GPS coordinates are strictly
+          excluded.
         </span>
       </div>
 
@@ -183,15 +366,19 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
       {/* Headcount KPI Strip */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatMetricCard
-          label="Scheduled / Deployed"
+          label={periodMode === 'daily' ? 'Scheduled / Deployed' : 'Deployed Man-Days'}
           value={totals.deployed}
-          subtext={`Sanctioned strength: ${totals.sanctioned}`}
+          subtext={`Sanctioned post baseline: ${totals.sanctioned}`}
           icon={Users}
         />
         <StatMetricCard
-          label="Present on Site"
+          label={periodMode === 'daily' ? 'Present on Site' : 'Present Man-Days'}
           value={totals.present}
-          subtext="Verified on-duty personnel today"
+          subtext={
+            periodMode === 'daily'
+              ? 'Verified on-duty personnel today'
+              : `Cumulative man-days in ${selectedMonth}`
+          }
           icon={UserCheck}
         />
         <StatMetricCard
@@ -218,9 +405,120 @@ export const SiteAttendanceSummaryPage: React.FC = () => {
         <div className="bg-white border border-[#E5DDD2] rounded-xl p-6">
           <EmptyStatePanel
             icon={CalendarCheck}
-            title="No Site Turnout Summary Recorded for Selected Date"
+            title="No Site Turnout Summary Recorded for Selected Period"
             description="Once duty rosters or daily attendance verifications are published for your assigned site, shift-wise and designation-wise headcounts appear here."
           />
+        </div>
+      ) : periodMode === 'monthly' ? (
+        <div className="space-y-6">
+          {/* Monthly Site-Level Rollup */}
+          <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
+            <div>
+              <h2 className="font-display text-lg font-semibold text-[#1F1916]">
+                Monthly Site Man-Day Summary — {selectedMonth}
+              </h2>
+              <p className="text-xs text-[#574B43]">
+                Aggregated shift man-days across reported dates in {selectedMonth} (zero employee
+                PII).
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-y border-[#E5DDD2] bg-[#FAF8F5] text-xs font-semibold text-[#574B43]">
+                    <th className="py-3 px-3">Site</th>
+                    <th className="py-3 px-3 text-right">Days Logged</th>
+                    <th className="py-3 px-3 text-right">Sanctioned Posts</th>
+                    <th className="py-3 px-3 text-right">Deployed Man-Days</th>
+                    <th className="py-3 px-3 text-right">Present Man-Days</th>
+                    <th className="py-3 px-3 text-right">Late</th>
+                    <th className="py-3 px-3 text-right">Absent</th>
+                    <th className="py-3 px-3 text-right">Weekly Off / Leave</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5DDD2] text-sm">
+                  {monthlySiteRollups.map((m) => (
+                    <tr key={m.siteId} className="hover:bg-[#FAF8F5]">
+                      <td className="py-3 px-3">
+                        <div className="font-medium text-[#1F1916]">{m.siteName}</div>
+                        <div className="text-xs text-[#574B43] font-mono-tabular">
+                          {m.siteId} · {m.clientName}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#1F1916]">
+                        {m.daysReported}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#1F1916]">
+                        {m.sanctionedPeak}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#1F1916]">
+                        {m.totalDeployedManDays}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#166534]">
+                        {m.totalPresentManDays}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#B45309]">
+                        {m.totalLateManDays}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#B91C1C]">
+                        {m.totalAbsentManDays}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#574B43]">
+                        {m.totalWeeklyOffManDays}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* Date-by-Date Breakdown inside Month */}
+          <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
+            <h2 className="font-display text-lg font-semibold text-[#1F1916]">
+              Date-by-Date Site Turnout Log ({selectedMonth})
+            </h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-y border-[#E5DDD2] bg-[#FAF8F5] text-xs font-semibold text-[#574B43]">
+                    <th className="py-3 px-3">Date</th>
+                    <th className="py-3 px-3">Site</th>
+                    <th className="py-3 px-3 text-right">Deployed</th>
+                    <th className="py-3 px-3 text-right">Present</th>
+                    <th className="py-3 px-3 text-right">Late</th>
+                    <th className="py-3 px-3 text-right">Absent</th>
+                    <th className="py-3 px-3 text-right">Weekly Off / Leave</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5DDD2] text-sm">
+                  {summaries.map((s) => (
+                    <tr key={s.summaryId} className="hover:bg-[#FAF8F5]">
+                      <td className="py-3 px-3 font-mono-tabular text-xs font-semibold text-[#1F1916] whitespace-nowrap">
+                        {s.attendanceDate}
+                      </td>
+                      <td className="py-3 px-3 text-[#1F1916]">{s.siteName}</td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#1F1916]">
+                        {s.totalDeployed}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#166534]">
+                        {s.presentCount + s.lateCount + s.halfDayCount}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#B45309]">
+                        {s.lateCount}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#B91C1C]">
+                        {s.absentCount}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono-tabular text-[#574B43]">
+                        {s.weeklyOffCount + s.leaveCount}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
       ) : (
         summaries.map((sum) => (

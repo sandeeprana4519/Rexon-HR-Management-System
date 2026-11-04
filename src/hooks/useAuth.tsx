@@ -22,7 +22,11 @@ import {
   subscribeMasterData,
 } from '../services/firestore/masterDataService';
 import {
+  authenticatePreviewProvisionedUser,
   fetchVerifiedUserProfile,
+  loadActivePreviewCustomUser,
+  readLocalAvatarFallback,
+  saveActivePreviewCustomUserUid,
   updateOwnUserProfile,
 } from '../services/firestore/userRoleService';
 
@@ -36,9 +40,13 @@ interface AuthContextValue {
   isPreviewSession: boolean;
   showSampleLayoutData: boolean;
   setShowSampleLayoutData: (val: boolean) => void;
-  loginWithEmail: (email: string, password: string) => Promise<RexonUser>;
+  loginWithEmail: (emailOrSystemId: string, password: string) => Promise<RexonUser>;
   enterPreviewPortal: (role: UserRole) => void;
-  updateProfileInfo: (updates: { fullName: string; phone: string }) => Promise<void>;
+  updateProfileInfo: (updates: {
+    fullName: string;
+    phone: string;
+    profilePhoto?: string;
+  }) => Promise<void>;
   logout: () => Promise<string>;
   clearAuthError: () => void;
 }
@@ -54,6 +62,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     if (!isFirebaseConfigured) {
+      const customPreviewUser = loadActivePreviewCustomUser();
+      if (customPreviewUser) {
+        if (!customPreviewUser.isActive) {
+          saveActivePreviewCustomUserUid(null);
+          void executeLogout(customPreviewUser.role);
+          setAuthError('This portal account is currently marked Inactive by Administration.');
+          setUser(null);
+        } else {
+          const cachedAvatar = readLocalAvatarFallback(customPreviewUser.uid);
+          setUser({
+            ...customPreviewUser,
+            ...(cachedAvatar ? { profilePhoto: cachedAvatar } : {}),
+          });
+          setIsPreviewSession(true);
+          setShowSampleLayoutData(true);
+        }
+        setLoading(false);
+        return;
+      }
+
       const savedDemoRole = loadPreviewRoleSession();
       if (savedDemoRole) {
         const base = buildDemoProfileByRole(savedDemoRole);
@@ -63,7 +91,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setAuthError(`This HR account is currently marked ${accountStatus} by Administration.`);
           setUser(null);
         } else {
-          setUser(resolved);
+          const cachedAvatar = readLocalAvatarFallback(resolved.uid);
+          setUser({
+            ...resolved,
+            ...(cachedAvatar ? { profilePhoto: cachedAvatar } : {}),
+          });
           setIsPreviewSession(true);
           setShowSampleLayoutData(true);
         }
@@ -124,6 +156,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return subscribeMasterData(() => {
       const { user: synced, accountStatus } = resolvePreviewHRUserOverlay(user);
       if (accountStatus !== 'Active') {
+        saveActivePreviewCustomUserUid(null);
         void executeLogout('hr');
         setUser(null);
         setIsPreviewSession(false);
@@ -134,31 +167,57 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, [isPreviewSession, user]);
 
-  const loginWithEmail = useCallback(async (email: string, password: string): Promise<RexonUser> => {
+  const loginWithEmail = useCallback(async (emailOrSystemId: string, password: string): Promise<RexonUser> => {
     setAuthError(null);
 
     if (isFirebaseConfigured) {
-      const { userProfile } = await signInWithVerifiedRole(email, password);
+      const { userProfile } = await signInWithVerifiedRole(emailOrSystemId, password);
       setUser(userProfile);
       setIsPreviewSession(false);
       return userProfile;
     }
 
-    const demoUser = verifyDemoCredentials(email, password);
+    // 1. Check newly created Preview Portal Accounts (HR, Field Officer, Site, Employee)
+    const customPreviewMatch = authenticatePreviewProvisionedUser(emailOrSystemId, password);
+    if (customPreviewMatch) {
+      if (!customPreviewMatch.isActive) {
+        throw new Error('Your REXON portal account is currently marked Inactive by Administration.');
+      }
+      savePreviewRoleSession(customPreviewMatch.role);
+      saveActivePreviewCustomUserUid(customPreviewMatch.uid);
+      const cachedAvatar = readLocalAvatarFallback(customPreviewMatch.uid);
+      const resolvedCustom: RexonUser = {
+        ...customPreviewMatch,
+        ...(cachedAvatar ? { profilePhoto: cachedAvatar } : {}),
+      };
+      setUser(resolvedCustom);
+      setIsPreviewSession(true);
+      setShowSampleLayoutData(true);
+      return resolvedCustom;
+    }
+
+    // 2. Check built-in Demo Credentials
+    const demoUser = verifyDemoCredentials(emailOrSystemId, password);
     if (demoUser) {
       const { user: resolved, accountStatus } = resolvePreviewHRUserOverlay(demoUser);
       if (accountStatus !== 'Active') {
         throw new Error(`Your HR account is marked ${accountStatus} by Administration.`);
       }
+      saveActivePreviewCustomUserUid(null);
       savePreviewRoleSession(resolved.role);
-      setUser(resolved);
+      const cachedAvatar = readLocalAvatarFallback(resolved.uid);
+      const withAvatar: RexonUser = {
+        ...resolved,
+        ...(cachedAvatar ? { profilePhoto: cachedAvatar } : {}),
+      };
+      setUser(withAvatar);
       setIsPreviewSession(true);
       setShowSampleLayoutData(true);
-      return resolved;
+      return withAvatar;
     }
 
     throw new Error(
-      'Invalid email or password. Use the testing Demo ID & Password listed below, or configure Firebase (.env) for live accounts.'
+      'Invalid Login ID / Email or Password. Verify your issued Portal Login ID & Password or contact Administration.'
     );
   }, []);
 
@@ -173,6 +232,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAuthError(`This HR account is marked ${accountStatus} by Administration.`);
       return;
     }
+    saveActivePreviewCustomUserUid(null);
     savePreviewRoleSession(role);
     setUser(resolved);
     setIsPreviewSession(true);
@@ -181,10 +241,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const updateProfileInfo = useCallback(
-    async (updates: { fullName: string; phone: string }) => {
+    async (updates: { fullName: string; phone: string; profilePhoto?: string }) => {
       if (!user) {
         throw new Error('No user session active.');
       }
+
+      await updateOwnUserProfile(user.uid, updates);
 
       if (isPreviewSession || !isFirebaseConfigured) {
         setUser((prev) =>
@@ -193,6 +255,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 ...prev,
                 fullName: updates.fullName.trim(),
                 phone: updates.phone.trim(),
+                ...(updates.profilePhoto !== undefined
+                  ? { profilePhoto: updates.profilePhoto || undefined }
+                  : {}),
                 updatedAt: new Date().toISOString(),
               }
             : null
@@ -200,10 +265,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      await updateOwnUserProfile(user.uid, updates);
       const refreshed = await fetchVerifiedUserProfile(user.uid);
       if (refreshed) {
-        setUser(refreshed);
+        setUser({
+          ...refreshed,
+          ...(updates.profilePhoto !== undefined && updates.profilePhoto
+            ? { profilePhoto: updates.profilePhoto }
+            : {}),
+        });
       }
     },
     [user, isPreviewSession]
@@ -211,6 +280,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = useCallback(async (): Promise<string> => {
     const lastRole = user?.role ?? null;
+    saveActivePreviewCustomUserUid(null);
     const redirectPath = await executeLogout(lastRole);
     setUser(null);
     setIsPreviewSession(false);

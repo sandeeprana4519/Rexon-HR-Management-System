@@ -1,17 +1,58 @@
 import { ServiceCategory, UserRole } from './index';
 
 // ============================================================================
-// 1. DUTY ROSTER TYPES (`dutyRosters` COLLECTION)
+// 1. DUTY ROSTER & SHIFT MASTER TYPES (`dutyRosters` & `shifts` COLLECTIONS)
 // ============================================================================
 export const ROSTER_SHIFT_TYPES = [
+  'General Shift',
+  'Morning Shift',
+  'Evening Shift',
   'Day Shift',
   'Night Shift',
-  'General Shift',
   'Rotational Shift',
   'Custom Shift',
 ] as const;
 
 export type RosterShiftType = (typeof ROSTER_SHIFT_TYPES)[number];
+
+export type ShiftMasterStatus = 'Active' | 'Inactive';
+
+export interface ShiftMasterRecord {
+  shiftId: string; // e.g. SHF-2026-0001
+  shiftName: string;
+  shiftCode: string;
+  shiftType: RosterShiftType;
+  startTime: string; // HH:MM (24h)
+  endTime: string; // HH:MM (24h)
+  reportingTime: string; // HH:MM (24h)
+  gracePeriodMinutes: number;
+  breakDurationMinutes: number;
+  weeklyOffDay: string; // e.g. 'Sunday' | 'Rotational'
+  crossesMidnight: boolean;
+  overtimeEligible: boolean;
+  cutoffMinutesAfterEnd: number; // Minutes after scheduled end before unmarked shift is flagged Absent
+  status: ShiftMasterStatus;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertShiftMasterInput {
+  shiftId?: string;
+  shiftName: string;
+  shiftCode: string;
+  shiftType: RosterShiftType;
+  startTime: string;
+  endTime: string;
+  reportingTime: string;
+  gracePeriodMinutes: number;
+  breakDurationMinutes: number;
+  weeklyOffDay: string;
+  overtimeEligible: boolean;
+  cutoffMinutesAfterEnd?: number;
+  status: ShiftMasterStatus;
+}
 
 export const ROSTER_SCHEDULE_MODES = ['Daily', 'Weekly', 'Monthly'] as const;
 export type RosterScheduleMode = (typeof ROSTER_SCHEDULE_MODES)[number];
@@ -32,26 +73,6 @@ export interface DutyRosterPresetShift {
 
 export const DUTY_ROSTER_SHIFT_PRESETS: readonly DutyRosterPresetShift[] = [
   {
-    shiftType: 'Day Shift',
-    label: 'Day Shift (08:00 – 20:00 · 12h)',
-    startTime: '08:00',
-    endTime: '20:00',
-    reportingTime: '07:45',
-    breakDurationMinutes: 60,
-    gracePeriodMinutes: 15,
-    crossesMidnight: false,
-  },
-  {
-    shiftType: 'Night Shift',
-    label: 'Night Shift (20:00 – 08:00 Next Day · 12h)',
-    startTime: '20:00',
-    endTime: '08:00',
-    reportingTime: '19:45',
-    breakDurationMinutes: 60,
-    gracePeriodMinutes: 15,
-    crossesMidnight: true,
-  },
-  {
     shiftType: 'General Shift',
     label: 'General Shift (09:00 – 18:00 · 9h)',
     startTime: '09:00',
@@ -62,8 +83,8 @@ export const DUTY_ROSTER_SHIFT_PRESETS: readonly DutyRosterPresetShift[] = [
     crossesMidnight: false,
   },
   {
-    shiftType: 'Rotational Shift',
-    label: 'Rotational Shift A (06:00 – 14:00 · 8h)',
+    shiftType: 'Morning Shift',
+    label: 'Morning Shift (06:00 – 14:00 · 8h)',
     startTime: '06:00',
     endTime: '14:00',
     reportingTime: '05:45',
@@ -72,12 +93,52 @@ export const DUTY_ROSTER_SHIFT_PRESETS: readonly DutyRosterPresetShift[] = [
     crossesMidnight: false,
   },
   {
-    shiftType: 'Custom Shift',
-    label: 'Custom Shift Timing',
+    shiftType: 'Evening Shift',
+    label: 'Evening Shift (14:00 – 22:00 · 8h)',
     startTime: '14:00',
     endTime: '22:00',
     reportingTime: '13:45',
     breakDurationMinutes: 30,
+    gracePeriodMinutes: 10,
+    crossesMidnight: false,
+  },
+  {
+    shiftType: 'Night Shift',
+    label: 'Night Shift (22:00 – 06:00 Next Day · 8h)',
+    startTime: '22:00',
+    endTime: '06:00',
+    reportingTime: '21:45',
+    breakDurationMinutes: 30,
+    gracePeriodMinutes: 15,
+    crossesMidnight: true,
+  },
+  {
+    shiftType: 'Day Shift',
+    label: 'Day Shift 12h (08:00 – 20:00 · 12h)',
+    startTime: '08:00',
+    endTime: '20:00',
+    reportingTime: '07:45',
+    breakDurationMinutes: 60,
+    gracePeriodMinutes: 15,
+    crossesMidnight: false,
+  },
+  {
+    shiftType: 'Rotational Shift',
+    label: 'Rotational Shift (20:00 – 08:00 Next Day · 12h)',
+    startTime: '20:00',
+    endTime: '08:00',
+    reportingTime: '19:45',
+    breakDurationMinutes: 60,
+    gracePeriodMinutes: 15,
+    crossesMidnight: true,
+  },
+  {
+    shiftType: 'Custom Shift',
+    label: 'Custom Shift Timing',
+    startTime: '10:00',
+    endTime: '19:00',
+    reportingTime: '09:45',
+    breakDurationMinutes: 60,
     gracePeriodMinutes: 15,
     crossesMidnight: false,
   },
@@ -105,6 +166,7 @@ export interface DutyRosterRecord {
   assignmentId: string; // Verified Phase 3 assignment reference
   dutyDate: string; // YYYY-MM-DD (Shift start date)
   dutyEndDate: string; // YYYY-MM-DD (Equals dutyDate + 1 day if crossesMidnight)
+  shiftId?: string;
   shiftType: RosterShiftType;
   dutyStartTime: string; // HH:MM
   dutyEndTime: string; // HH:MM
@@ -114,6 +176,7 @@ export interface DutyRosterRecord {
   netScheduledMinutes: number;
   reportingTime: string; // HH:MM
   gracePeriodMinutes: number;
+  weeklyOffDay?: string;
   assignedFieldOfficerUid: string;
   assignedFieldOfficerName: string;
   dutyInstructions: string;
@@ -138,15 +201,18 @@ export interface CreateDutyRosterInput {
   serviceId: string;
   designationId: string;
   employeeId: string;
+  employeeIds?: string[]; // Optional bulk employee selection
   dutyDate: string; // Start date for Weekly/Monthly or exact date for Daily
   endDate?: string; // Optional explicit range end for Weekly/Monthly
   skipWeekdays?: number[]; // Optional JS day-of-week numbers (0=Sun..6=Sat) to skip as Weekly Off
+  shiftId?: string;
   shiftType: RosterShiftType;
   dutyStartTime: string;
   dutyEndTime: string;
   breakDurationMinutes: number;
   reportingTime: string;
   gracePeriodMinutes: number;
+  weeklyOffDay?: string;
   assignedFieldOfficerUid: string;
   assignedFieldOfficerName: string;
   dutyInstructions: string;
@@ -156,12 +222,14 @@ export interface CreateDutyRosterInput {
 }
 
 export interface UpdateDutyRosterInput {
+  shiftId?: string;
   shiftType: RosterShiftType;
   dutyStartTime: string;
   dutyEndTime: string;
   breakDurationMinutes: number;
   reportingTime: string;
   gracePeriodMinutes: number;
+  weeklyOffDay?: string;
   assignedFieldOfficerUid: string;
   assignedFieldOfficerName: string;
   dutyInstructions: string;
@@ -172,7 +240,7 @@ export interface UpdateDutyRosterInput {
 }
 
 // ============================================================================
-// 2. ATTENDANCE & GEOFENCE / QR VERIFICATION TYPES (`attendance` COLLECTION)
+// 2. ATTENDANCE, GPS LOCATION, PHOTO & PAYROLL VERIFICATION (`attendance`)
 // ============================================================================
 export const ATTENDANCE_STATUSES = [
   'Present',
@@ -182,11 +250,34 @@ export const ATTENDANCE_STATUSES = [
   'Weekly Off',
   'Holiday',
   'Leave',
+  'On Duty',
+  'Pending Verification',
+  'Rejected',
+  'Incomplete',
   'Pending',
   'Exception',
 ] as const;
 
 export type AttendanceStatus = (typeof ATTENDANCE_STATUSES)[number];
+
+export const ATTENDANCE_VERIFICATION_STATUSES = [
+  'Pending',
+  'Verified',
+  'Rejected',
+  'Exception Approved',
+] as const;
+
+export type AttendanceVerificationStatus = (typeof ATTENDANCE_VERIFICATION_STATUSES)[number];
+
+export const ATTENDANCE_LOCATION_STATUSES = [
+  'Within Geofence',
+  'Outside Geofence',
+  'GPS Accuracy Low',
+  'GPS Permission Denied',
+  'Location Unavailable',
+] as const;
+
+export type AttendanceLocationStatus = (typeof ATTENDANCE_LOCATION_STATUSES)[number];
 
 export const CHECK_IN_METHODS = ['GPS', 'QR', 'Manual_HR'] as const;
 export type CheckInMethod = (typeof CHECK_IN_METHODS)[number];
@@ -207,12 +298,37 @@ export type AttendanceVerificationOutcome = (typeof VERIFICATION_OUTCOMES)[numbe
 export interface AttendanceGeoMetadata {
   latitude: number | null;
   longitude: number | null;
+  siteLatitude?: number | null;
+  siteLongitude?: number | null;
   accuracyMeters: number | null;
   distanceMeters: number | null;
   allowedRadiusMeters: number;
   withinGeofence: boolean;
+  locationStatus?: AttendanceLocationStatus;
   serverVerified: boolean;
   capturedAt: string;
+}
+
+export interface AttendancePhotoMetadata {
+  storagePath: string;
+  previewUrl: string; // Signed Firebase Storage download URL or compact compressed JPEG preview
+  employeeId: string;
+  attendanceId: string;
+  captureTime: string;
+  photoType: 'check_in' | 'check_out' | 'field_report';
+  cameraFacing: 'user' | 'environment';
+  uploadedBy: string;
+}
+
+export interface AttendanceTimeCorrectionEntry {
+  correctedAt: string;
+  correctedByUid: string;
+  correctedByName: string;
+  previousCheckInAt: string | null;
+  previousCheckOutAt: string | null;
+  newCheckInAt: string | null;
+  newCheckOutAt: string | null;
+  reason: string;
 }
 
 export interface AttendanceDeviceMetadata {
@@ -228,6 +344,8 @@ export type OvertimeApprovalStatus = 'None' | 'Pending' | 'Approved' | 'Rejected
  * Primary Operational Attendance Record: `attendance/{attendanceId}`
  * Never readable by Site Portal (`role == 'site'`).
  * Employees can read ONLY their own linked records (`linkedUid == auth.uid`).
+ * ONLY records where `isPayrollEligible === true` (`Verified` or `Exception Approved`)
+ * are included in downstream Payroll calculations.
  */
 export interface AttendanceRecord {
   attendanceId: string; // e.g. ATT-2026-0001
@@ -257,12 +375,17 @@ export interface AttendanceRecord {
   breakDurationMinutes: number;
   gracePeriodMinutes: number;
   status: AttendanceStatus;
+  verificationStatus?: AttendanceVerificationStatus;
+  locationStatus?: AttendanceLocationStatus;
+  isPayrollEligible?: boolean;
   checkInAt: string | null; // ISO timestamp
   checkOutAt: string | null; // ISO timestamp
   checkInMethod: CheckInMethod | null;
   checkOutMethod: CheckInMethod | null;
   checkInGeo: AttendanceGeoMetadata | null;
   checkOutGeo: AttendanceGeoMetadata | null;
+  checkInPhoto?: AttendancePhotoMetadata | null;
+  checkOutPhoto?: AttendancePhotoMetadata | null;
   qrSessionId: string;
   qrVerificationStatus: string;
   deviceMetadata: AttendanceDeviceMetadata | null;
@@ -284,6 +407,8 @@ export interface AttendanceRecord {
   exceptionReason: string;
   hrRemarks: string;
   fieldOfficerRemarks: string;
+  timeCorrectionHistory?: AttendanceTimeCorrectionEntry[];
+  idempotencyKey?: string;
   createdBy: string;
   updatedBy: string;
   createdAt: string;
@@ -309,9 +434,12 @@ export interface EmployeeCheckInInput {
   latitude?: number | null;
   longitude?: number | null;
   accuracyMeters?: number | null;
+  gpsLocationStatus?: AttendanceLocationStatus;
   qrTokenOrCode?: string;
+  photo?: AttendancePhotoMetadata | null;
   submitAsException?: boolean;
   exceptionReason?: string;
+  idempotencyKey?: string;
 }
 
 export interface EmployeeCheckOutInput {
@@ -320,8 +448,11 @@ export interface EmployeeCheckOutInput {
   latitude?: number | null;
   longitude?: number | null;
   accuracyMeters?: number | null;
+  gpsLocationStatus?: AttendanceLocationStatus;
   qrTokenOrCode?: string;
+  photo?: AttendancePhotoMetadata | null;
   exceptionReason?: string;
+  idempotencyKey?: string;
 }
 
 export interface ManualHrAttendanceInput {
@@ -394,6 +525,7 @@ export interface SubmitAttendanceCorrectionInput {
   attendanceId?: string;
   rosterId?: string;
   assignmentId?: string;
+  employeeId?: string; // Supported when HR or Field Officer submits on behalf of an employee
   siteId: string;
   attendanceDate: string;
   shiftType: string;
@@ -403,6 +535,133 @@ export interface SubmitAttendanceCorrectionInput {
   reason: string;
   supportingLocationNote?: string;
 }
+
+// ============================================================================
+// 3B. FIELD OFFICER REPORTS & ATTENDANCE EXCEPTIONS (`attendanceExceptions`)
+// ============================================================================
+export const FIELD_OFFICER_EXCEPTION_TYPES = [
+  'Missing Attendance',
+  'Attendance Issue',
+  'Site Visit Report',
+  'Employee Replacement Requirement',
+] as const;
+
+export type FieldOfficerExceptionType = (typeof FIELD_OFFICER_EXCEPTION_TYPES)[number];
+
+export type AttendanceExceptionStatus = 'Pending HR Review' | 'Resolved' | 'Rejected';
+
+export interface AttendanceExceptionReport {
+  exceptionId: string; // e.g. AEX-2026-0001
+  reportType: FieldOfficerExceptionType;
+  branchId: string;
+  clientId: string;
+  siteId: string;
+  siteName: string;
+  attendanceDate: string; // YYYY-MM-DD
+  employeeId: string; // Optional empty string for site-wide visit report
+  employeeName: string;
+  shiftType: string;
+  summary: string;
+  remarks: string;
+  photoUrl: string;
+  photoStoragePath: string;
+  status: AttendanceExceptionStatus;
+  reportedByUid: string;
+  reportedByName: string;
+  reportedByRole: UserRole;
+  reviewedByUid: string | null;
+  reviewedByName: string | null;
+  hrResolutionNotes: string;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubmitFieldOfficerExceptionInput {
+  reportType: FieldOfficerExceptionType;
+  siteId: string;
+  attendanceDate: string;
+  employeeId?: string;
+  shiftType?: string;
+  summary: string;
+  remarks: string;
+  photoUrl?: string;
+  photoStoragePath?: string;
+}
+
+// ============================================================================
+// 3C. ATTENDANCE POLICY & GEOFENCE OVERRIDE APPROVALS (`attendanceApprovals`)
+// ============================================================================
+export interface AttendancePolicyConfig {
+  defaultGeofenceRadiusMeters: number; // Default 200m
+  defaultGpsAccuracyThresholdMeters: number; // Default 100m
+  shiftAbsentCutoffMinutes: number; // Minutes after shift end before scheduled duty is flagged Absent
+  overtimeMinimumMinutes: number; // Minimum extra minutes to qualify for Overtime review
+  requireCheckInPhoto: boolean;
+  requireCheckOutPhoto: boolean;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface AttendanceApprovalRecord {
+  approvalId: string; // e.g. AAP-2026-0001
+  approvalType: 'Site Geofence Radius Override' | 'Attendance Policy Change';
+  branchId: string;
+  siteId: string;
+  siteName: string;
+  requestedRadiusMeters: number;
+  currentRadiusMeters: number;
+  reason: string;
+  status: 'Pending' | 'Approved' | 'Rejected';
+  requestedByUid: string;
+  requestedByName: string;
+  requestedByRole: UserRole;
+  reviewedByUid: string | null;
+  reviewedByName: string | null;
+  reviewRemarks: string;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ============================================================================
+// 3D. OFFLINE ATTENDANCE QUEUE (CLIENT RESILIENCE — NEVER AUTO-VERIFIED)
+// ============================================================================
+export interface OfflineAttendanceQueueItem {
+  queueId: string;
+  idempotencyKey: string;
+  action: 'check_in' | 'check_out';
+  employeeUid: string;
+  employeeName: string;
+  siteId: string;
+  siteName: string;
+  attendanceDate: string;
+  capturedAt: string;
+  checkInPayload?: EmployeeCheckInInput;
+  checkOutPayload?: EmployeeCheckOutInput;
+  retryCount: number;
+  lastError: string;
+}
+
+// ============================================================================
+// 3E. 12 PHASE 4 ATTENDANCE REPORT TYPES
+// ============================================================================
+export const ATTENDANCE_REPORT_TYPES = [
+  'Daily Attendance Report',
+  'Weekly Attendance Report',
+  'Monthly Attendance Report',
+  'Employee-wise Attendance Report',
+  'Site-wise Attendance Report',
+  'Client-wise Attendance Report',
+  'Branch-wise Attendance Report',
+  'Service-wise Attendance Report',
+  'Late Arrival Report',
+  'Overtime Report',
+  'Missing Check-out Report',
+  'Attendance Exception Report',
+] as const;
+
+export type AttendanceReportType = (typeof ATTENDANCE_REPORT_TYPES)[number];
 
 // ============================================================================
 // 4. TIME-LIMITED ROTATING SITE QR SESSIONS (`attendanceQrSessions`)
@@ -462,11 +721,13 @@ export interface EmployeeNotificationRecord {
 // ============================================================================
 export type AttendanceAuditCategory =
   | 'Roster'
+  | 'Shift'
   | 'Attendance'
   | 'Geofence'
   | 'QR'
   | 'Correction'
-  | 'Overtime';
+  | 'Overtime'
+  | 'FieldReport';
 
 export interface AttendanceAuditRecord {
   auditId: string; // e.g. AAL-2026-0001
@@ -545,6 +806,7 @@ export interface EmployeeTodayDutyContext {
     branchId: string;
     branchName: string;
     employeeStatus: string;
+    profilePhoto?: string;
   } | null;
   activeRoster: DutyRosterRecord | null;
   fallbackAssignment: {
@@ -571,6 +833,7 @@ export interface EmployeeTodayDutyContext {
   siteGeoConfig: {
     siteId: string;
     siteName: string;
+    fullAddress?: string;
     latitude: number | null;
     longitude: number | null;
     allowedRadiusMeters: number;
@@ -578,6 +841,14 @@ export interface EmployeeTodayDutyContext {
     isGpsMandatory: boolean;
     isQrEnabled: boolean;
   } | null;
+  approvedLeaveToday?: {
+    requestId: string;
+    leaveType: string;
+    startDate: string;
+    endDate: string;
+    reason: string;
+  } | null;
+  isPhotoRequired?: boolean;
   todayAttendance: AttendanceRecord | null;
   openOvernightAttendance: AttendanceRecord | null;
   unreadNotificationsCount: number;
@@ -597,6 +868,7 @@ export interface EmployeeAttendanceSummaryRollup {
   holidayDays: number;
   leaveDays: number;
   exceptionDays: number;
+  verifiedPayrollDays: number;
   totalNetHours: number;
   approvedOvertimeHours: number;
   pendingOvertimeHours: number;

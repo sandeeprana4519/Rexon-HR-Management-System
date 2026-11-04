@@ -15,9 +15,13 @@ export type PortalSlug = 'admin' | 'hr' | 'field-officer' | 'site' | 'employee';
  */
 export interface RexonUser {
   uid: string;
+  systemId?: string;
   fullName: string;
   email: string;
   phone: string;
+  profilePhoto?: string;
+  designationLabel?: string;
+  initialAccessKey?: string;
   role: UserRole;
   branchId: string;
   assignedBranches?: string[];
@@ -26,6 +30,20 @@ export interface RexonUser {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface IssuedPortalCredentials {
+  role: UserRole;
+  portalName: string;
+  loginPath: string;
+  systemId: string;
+  fullName: string;
+  loginEmail: string;
+  loginPassword: string;
+  uid: string;
+  branchLabel?: string;
+  siteLabel?: string;
+  isPreviewMode?: boolean;
 }
 
 export interface PortalNavItem {

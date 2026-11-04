@@ -328,7 +328,7 @@ async function startServer() {
     const sLat = Number(siteLat);
     const sLng = Number(siteLng);
     const acc = accuracyMeters == null ? null : Number(accuracyMeters);
-    const radius = Math.min(5000, Math.max(20, Number(allowedRadiusMeters) || 150));
+    const radius = Math.min(5000, Math.max(20, Number(allowedRadiusMeters) || 200));
     const maxAcc = Math.min(1000, Math.max(10, Number(accuracyThresholdMeters) || 100));
 
     if (
@@ -580,6 +580,84 @@ async function startServer() {
       sessionId,
       verificationOutcome: 'QR_Verified',
       verifiedAt: new Date(nowMs).toISOString(),
+    });
+  });
+
+  /**
+   * 6. Server-Side Phase 4 -> Phase 5 Payroll Readiness Gate
+   * - Strictly excludes unverified, rejected, absent, or offline-unsynced attendance records.
+   */
+  app.post('/api/attendance/payroll-eligible-summary', (req: Request, res: Response) => {
+    const { records, branchId, month } = req.body ?? {};
+    if (!Array.isArray(records)) {
+      res.status(400).json({
+        error: 'records array is required to compute payroll-eligible attendance summary.',
+      });
+      return;
+    }
+
+    const eligibleByEmployee = new Map<
+      string,
+      {
+        employeeId: string;
+        employeeName: string;
+        payrollEligibleDays: number;
+        totalNetHours: number;
+        approvedOvertimeMinutes: number;
+      }
+    >();
+    let excludedUnverifiedCount = 0;
+
+    for (const raw of records as Array<Record<string, unknown>>) {
+      if (branchId && branchId !== 'ALL' && String(raw.branchId || '') !== String(branchId)) {
+        continue;
+      }
+      if (month && !String(raw.attendanceDate || '').startsWith(String(month))) {
+        continue;
+      }
+
+      const status = String(raw.status || '');
+      const verificationStatus = String(raw.verificationStatus || '');
+      const isVerifiedFlag =
+        Boolean(raw.isVerifiedByHr) ||
+        verificationStatus === 'Verified' ||
+        verificationStatus === 'Exception Approved';
+      const isEligible =
+        Boolean(raw.isPayrollEligible) &&
+        isVerifiedFlag &&
+        status !== 'Rejected' &&
+        status !== 'Absent' &&
+        status !== 'Pending';
+
+      if (!isEligible) {
+        excludedUnverifiedCount += 1;
+        continue;
+      }
+
+      const empId = String(raw.employeeId || '');
+      if (!empId) continue;
+
+      const current = eligibleByEmployee.get(empId) ?? {
+        employeeId: empId,
+        employeeName: String(raw.employeeName || empId),
+        payrollEligibleDays: 0,
+        totalNetHours: 0,
+        approvedOvertimeMinutes: 0,
+      };
+      current.payrollEligibleDays += status === 'Half Day' ? 0.5 : 1;
+      current.totalNetHours =
+        Math.round((current.totalNetHours + (Number(raw.totalDutyHours) || 0)) * 100) / 100;
+      if (String(raw.overtimeStatus || '') === 'Approved') {
+        current.approvedOvertimeMinutes += Math.max(0, Number(raw.approvedOvertimeMinutes) || 0);
+      }
+      eligibleByEmployee.set(empId, current);
+    }
+
+    res.status(200).json({
+      serverEvaluated: true,
+      evaluatedAt: new Date().toISOString(),
+      eligibleEmployeeSummaries: Array.from(eligibleByEmployee.values()),
+      excludedUnverifiedCount,
     });
   });
 

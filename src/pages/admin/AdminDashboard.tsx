@@ -5,6 +5,8 @@ import {
   Award,
   Briefcase,
   Building2,
+  CalendarClock,
+  ClipboardCheck,
   ClipboardList,
   KeyRound,
   Layers,
@@ -23,6 +25,11 @@ import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
 import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
+import {
+  listAttendanceApprovals,
+  reviewAttendanceApproval,
+  subscribeAttendanceData,
+} from '../../services/firestore/attendanceService';
 import { listEmployees, subscribeEmployeeData } from '../../services/firestore/employeeService';
 import {
   decideApprovalRequest,
@@ -40,6 +47,7 @@ import {
 } from '../../services/firestore/portalMetricsService';
 import {
   ApprovalRequestRecord,
+  AttendanceApprovalRecord,
   AuditLogRecord,
   BranchRecord,
   ClientRecord,
@@ -64,6 +72,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
   const [sites, setSites] = useState<SiteRecord[]>([]);
   const [employees, setEmployees] = useState<EmployeeRecord[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequestRecord[]>([]);
+  const [geoApprovals, setGeoApprovals] = useState<AttendanceApprovalRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
   const [loadingMetrics, setLoadingMetrics] = useState<boolean>(false);
   const [metricsError, setMetricsError] = useState<string | null>(null);
@@ -76,6 +85,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
 
   const [pendingDecision, setPendingDecision] = useState<{
     id: string;
+    kind: 'master' | 'geofence';
     action: 'Approved' | 'Rejected';
     summary: string;
   } | null>(null);
@@ -86,22 +96,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
     setLoadingMetrics(true);
     setMetricsError(null);
     try {
-      const [branchList, hrList, clientList, siteList, employeeList, approvalList, auditList] =
-        await Promise.all([
-          listBranches(user, isPreviewSession),
-          listHRProfiles(user, isPreviewSession),
-          listClients(user, isPreviewSession),
-          listSites(user, isPreviewSession),
-          listEmployees(user, isPreviewSession),
-          listApprovalRequests(user, isPreviewSession),
-          listAuditLogs(user, isPreviewSession),
-        ]);
+      const [
+        branchList,
+        hrList,
+        clientList,
+        siteList,
+        employeeList,
+        approvalList,
+        geoApprovalList,
+        auditList,
+      ] = await Promise.all([
+        listBranches(user, isPreviewSession),
+        listHRProfiles(user, isPreviewSession),
+        listClients(user, isPreviewSession),
+        listSites(user, isPreviewSession),
+        listEmployees(user, isPreviewSession),
+        listApprovalRequests(user, isPreviewSession),
+        listAttendanceApprovals(user, isPreviewSession).catch(() => []),
+        listAuditLogs(user, isPreviewSession),
+      ]);
       setBranches(branchList);
       setHrProfiles(hrList);
       setClients(clientList);
       setSites(siteList);
       setEmployees(employeeList);
       setApprovals(approvalList);
+      setGeoApprovals(geoApprovalList);
       setAuditLogs(auditList);
 
       if (isFirebaseConfigured && !isPreviewSession) {
@@ -125,9 +145,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
     const unsubEmp = subscribeEmployeeData(() => {
       void loadOverviewData();
     });
+    const unsubAtt = subscribeAttendanceData(() => {
+      void loadOverviewData();
+    });
     return () => {
       unsubMaster();
       unsubEmp();
+      unsubAtt();
     };
   }, [loadOverviewData]);
 
@@ -138,6 +162,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
   const pendingApprovals = useMemo(
     () => approvals.filter((a) => a.status === 'Pending'),
     [approvals]
+  );
+
+  const pendingGeoApprovals = useMemo(
+    () => geoApprovals.filter((a) => a.status === 'Pending'),
+    [geoApprovals]
   );
 
   const displayedMetrics = useMemo(() => {
@@ -151,11 +180,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
       clientsCount: nonArchivedClients.length,
       sitesCount: nonArchivedSites.length,
       employeesCount:
-        nonDeletedEmployees.length > 0 || !useSample
-          ? nonDeletedEmployees.length
-          : 620,
+        nonDeletedEmployees.length > 0 || !useSample ? nonDeletedEmployees.length : 620,
       fieldOfficersCount: useSample ? 14 : metrics.fieldOfficersCount,
-      pendingApprovalsCount: pendingApprovals.length,
+      pendingApprovalsCount: pendingApprovals.length + pendingGeoApprovals.length,
     };
   }, [
     activeBranches.length,
@@ -166,6 +193,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
     useSample,
     metrics,
     pendingApprovals.length,
+    pendingGeoApprovals.length,
   ]);
 
   const branchSummaryRows = useMemo(() => {
@@ -218,13 +246,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
     setDeciding(true);
     setMetricsError(null);
     try {
-      await decideApprovalRequest(
-        user,
-        isPreviewSession,
-        pendingDecision.id,
-        pendingDecision.action,
-        `${pendingDecision.action} from Executive Administration Dashboard.`
-      );
+      if (pendingDecision.kind === 'geofence') {
+        await reviewAttendanceApproval(
+          user,
+          isPreviewSession,
+          pendingDecision.id,
+          pendingDecision.action,
+          `${pendingDecision.action} from Executive Administration Dashboard.`
+        );
+      } else {
+        await decideApprovalRequest(
+          user,
+          isPreviewSession,
+          pendingDecision.id,
+          pendingDecision.action,
+          `${pendingDecision.action} from Executive Administration Dashboard.`
+        );
+      }
       setDecisionNotice(
         `Request ${pendingDecision.id} marked as ${pendingDecision.action} and recorded in Audit Logs.`
       );
@@ -248,8 +286,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
               : 'Executive Administration Dashboard'}
           </h1>
           <p className="mt-1 text-sm text-[#574B43]">
-            REXON Security &amp; Manpower Solution · Master Data Governance, RBAC, and Multi-Branch
-            Operations
+            REXON Security &amp; Manpower Solution · Master Data Governance, RBAC, Roster &amp;
+            Attendance Verification
           </p>
         </div>
 
@@ -257,7 +295,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
           type="button"
           onClick={() => void loadOverviewData()}
           disabled={loadingMetrics}
-          className="min-h-[42px] inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors self-start sm:self-auto whitespace-nowrap shrink-0"
+          className="min-h-[44px] inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] transition-colors self-start sm:self-auto whitespace-nowrap shrink-0"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loadingMetrics ? 'animate-spin' : ''}`} />
           <span>Refresh Summary</span>
@@ -326,7 +364,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
             <StatMetricCard
               label="Pending Approvals"
               value={displayedMetrics.pendingApprovalsCount}
-              subtext="Sensitive HR actions awaiting sign-off"
+              subtext="Sensitive HR & geofence overrides awaiting sign-off"
               icon={ShieldCheck}
               tone={displayedMetrics.pendingApprovalsCount > 0 ? 'attention' : 'default'}
             />
@@ -334,20 +372,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
         </section>
       )}
 
-      {/* Quick Master Data Actions */}
+      {/* Quick Master Data & Phase 4 Operations Shortcuts */}
       {section === 'overview' && (
         <section className="bg-[#F3EDE4] border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
           <div className="mb-4">
             <h2 className="font-display text-base font-semibold text-[#1F1916]">
-              Master Data &amp; Governance Shortcuts
+              Master Data, Roster &amp; Attendance Governance Shortcuts
             </h2>
             <p className="text-xs text-[#574B43]">
-              Direct access to Phase 2 Master Data, Service Catalog, Designations, Permissions, and
-              Audit Logs
+              Direct access to Master Data, Duty Roster &amp; Shift Masters, Attendance Verification,
+              Permissions, and Audit Logs
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <button
+              type="button"
+              onClick={() => navigate('/admin/rosters')}
+              className="min-h-[48px] flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-white border border-[#D4C7B8] text-left text-xs font-semibold text-[#1F1916] hover:border-[#5C3D2E] transition-colors whitespace-nowrap"
+            >
+              <span className="truncate">Duty Roster &amp; Shifts</span>
+              <CalendarClock className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/admin/attendance')}
+              className="min-h-[48px] flex items-center justify-between gap-3 px-4 py-3 rounded-lg bg-white border border-[#D4C7B8] text-left text-xs font-semibold text-[#1F1916] hover:border-[#5C3D2E] transition-colors whitespace-nowrap"
+            >
+              <span className="truncate">Attendance &amp; Verification</span>
+              <ClipboardCheck className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+            </button>
+
             <button
               type="button"
               onClick={() => navigate('/admin/branches')}
@@ -447,7 +503,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
             <button
               type="button"
               onClick={() => navigate('/admin/branches')}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] self-start sm:self-auto whitespace-nowrap shrink-0"
+              className="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] self-start sm:self-auto whitespace-nowrap shrink-0"
             >
               Open Full Branch Manager
             </button>
@@ -544,32 +600,105 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
 
       {/* Pending Approvals & Master Data Audit Stream */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <section className="lg:col-span-7 bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
+        <section className="lg:col-span-7 bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-                Pending Sensitive HR Approvals
+                Pending Sensitive HR &amp; Geofence Approvals
               </h2>
               <p className="mt-0.5 text-xs text-[#574B43]">
-                Sensitive HR actions require explicit Administrator confirmation before taking
-                effect.
+                Sensitive HR overrides and site geofence radius changes require explicit
+                Administrator confirmation.
               </p>
             </div>
             <button
               type="button"
               onClick={() => navigate('/admin/approvals')}
-              className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
+              className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
             >
               Open Full Queue
             </button>
           </div>
 
-          <div className="mt-4">
-            {approvals.length === 0 ? (
+          {geoApprovals.length > 0 && (
+            <div className="pt-2 border-t border-[#E5DDD2] space-y-3">
+              <div className="text-xs font-semibold text-[#5C3D2E]">
+                Site Geofence Radius Override Requests ({pendingGeoApprovals.length} Pending)
+              </div>
+              <div className="divide-y divide-[#E5DDD2]">
+                {geoApprovals.slice(0, 4).map((geoItem) => (
+                  <div key={geoItem.approvalId} className="py-3 first:pt-1 last:pb-1 space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#7D6F65]">
+                      <span>
+                        <span className="font-mono-tabular font-semibold text-[#5C3D2E]">
+                          {geoItem.approvalId}
+                        </span>{' '}
+                        · {geoItem.siteName} ({geoItem.siteId})
+                      </span>
+                      <span className="font-mono-tabular">
+                        {geoItem.currentRadiusMeters}m &rarr; {geoItem.requestedRadiusMeters}m
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#1F1916]">{geoItem.reason}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <span className="text-xs text-[#574B43]">
+                        Requested by {geoItem.requestedByName} ({geoItem.requestedByRole})
+                      </span>
+                      {geoItem.status === 'Pending' ? (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={deciding}
+                            onClick={() =>
+                              setPendingDecision({
+                                id: geoItem.approvalId,
+                                kind: 'geofence',
+                                action: 'Rejected',
+                                summary: `${geoItem.siteName}: ${geoItem.currentRadiusMeters}m -> ${geoItem.requestedRadiusMeters}m`,
+                              })
+                            }
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#B91C1C] hover:bg-[#FEF2F2] whitespace-nowrap shrink-0"
+                          >
+                            Reject
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deciding}
+                            onClick={() =>
+                              setPendingDecision({
+                                id: geoItem.approvalId,
+                                kind: 'geofence',
+                                action: 'Approved',
+                                summary: `${geoItem.siteName}: ${geoItem.currentRadiusMeters}m -> ${geoItem.requestedRadiusMeters}m`,
+                              })
+                            }
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap shrink-0"
+                          >
+                            Approve Radius
+                          </button>
+                        </div>
+                      ) : (
+                        <span
+                          className={`text-xs font-semibold ${
+                            geoItem.status === 'Approved' ? 'text-[#166534]' : 'text-[#B91C1C]'
+                          }`}
+                        >
+                          {geoItem.status}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            {approvals.length === 0 && geoApprovals.length === 0 ? (
               <EmptyStatePanel
                 icon={ShieldCheck}
                 title="Zero Approval Requests"
-                description="Sensitive HR workflow requests submitted to 'approvals/{approvalId}' appear here for Admin sign-off."
+                description="Sensitive HR workflow and site geofence override requests appear here for Admin sign-off."
                 actionLabel="Open Approvals Workspace"
                 onAction={() => navigate('/admin/approvals')}
               />
@@ -608,11 +737,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
                             onClick={() =>
                               setPendingDecision({
                                 id: item.approvalId,
+                                kind: 'master',
                                 action: 'Rejected',
                                 summary: item.summary,
                               })
                             }
-                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#B91C1C] hover:bg-[#FEF2F2] transition-colors whitespace-nowrap shrink-0"
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#B91C1C] hover:bg-[#FEF2F2] transition-colors whitespace-nowrap shrink-0"
                           >
                             Reject
                           </button>
@@ -622,11 +752,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
                             onClick={() =>
                               setPendingDecision({
                                 id: item.approvalId,
+                                kind: 'master',
                                 action: 'Approved',
                                 summary: item.summary,
                               })
                             }
-                            className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap shrink-0"
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap shrink-0"
                           >
                             Approve Action
                           </button>
@@ -659,13 +790,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ section = 'overv
                 Recent Master Data &amp; Audit Activity
               </h2>
               <p className="mt-0.5 text-xs text-[#574B43]">
-                Immutable chronological trail from <code className="font-mono-tabular">auditLogs</code>.
+                Immutable chronological trail from{' '}
+                <code className="font-mono-tabular">auditLogs</code>.
               </p>
             </div>
             <button
               type="button"
               onClick={() => navigate('/admin/audit-logs')}
-              className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
+              className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap shrink-0"
             >
               Audit Explorer
             </button>

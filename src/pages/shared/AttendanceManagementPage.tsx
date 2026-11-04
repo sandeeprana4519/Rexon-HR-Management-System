@@ -2,22 +2,28 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CalendarCheck,
+  Camera,
   CheckCircle2,
   ClipboardCheck,
   Clock,
   Download,
   FileSpreadsheet,
+  FileText,
+  FileWarning,
   History,
   MapPin,
   MessageSquarePlus,
   Navigation,
   Plus,
+  Printer,
   QrCode,
   Search,
   Settings2,
   ShieldCheck,
+  Sliders,
   X,
 } from 'lucide-react';
+import { CameraCaptureModal, CapturedAttendancePhoto } from '../../components/CameraCaptureModal';
 import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
 import { RotatingShiftQrModal } from '../../components/RotatingShiftQrModal';
@@ -26,13 +32,22 @@ import { useAuth } from '../../hooks/useAuth';
 import {
   addFieldOfficerAttendanceRemark,
   configureSiteGeofenceAndQr,
+  getAttendancePolicyConfig,
+  listAttendanceApprovals,
   listAttendanceAuditLogs,
   listAttendanceCorrectionRequests,
+  listAttendanceExceptionReports,
   listAttendanceRecords,
   recordManualHrAttendance,
+  requestSiteGeofenceOverrideApproval,
+  reviewAttendanceApproval,
   reviewAttendanceCorrectionRequest,
+  reviewFieldOfficerExceptionReport,
   reviewOvertimeByHr,
+  saveAttendancePolicyConfig,
+  submitFieldOfficerExceptionReport,
   subscribeAttendanceData,
+  uploadAttendanceVerificationPhoto,
   verifyOrUpdateAttendanceByHr,
 } from '../../services/firestore/attendanceService';
 import { listEmployees, subscribeEmployeeData } from '../../services/firestore/employeeService';
@@ -44,20 +59,33 @@ import {
   subscribeMasterData,
 } from '../../services/firestore/masterDataService';
 import {
+  ATTENDANCE_REPORT_TYPES,
   ATTENDANCE_STATUSES,
+  AttendanceApprovalRecord,
   AttendanceAuditRecord,
   AttendanceCorrectionRequest,
+  AttendanceExceptionReport,
+  AttendancePolicyConfig,
   AttendanceRecord,
+  AttendanceReportType,
   AttendanceStatus,
+  AttendanceVerificationStatus,
   BranchRecord,
   ClientRecord,
   EmployeeRecord,
+  FIELD_OFFICER_EXCEPTION_TYPES,
+  FieldOfficerExceptionType,
   ROSTER_SHIFT_TYPES,
   SERVICE_CATEGORIES,
   SiteRecord,
 } from '../../types';
+import { exportBrandedAttendancePdf } from '../../utils/attendancePdfExport';
 import {
-  buildEmployeeAttendanceRollups,
+  buildPhase4ReportDataset,
+  deriveAttendanceLocationStatus,
+  deriveAttendanceVerificationStatus,
+  formatIstTimeOnly,
+  isAttendancePayrollEligible,
   resolveSiteGeoSettings,
 } from '../../utils/attendanceValidation';
 import {
@@ -68,15 +96,31 @@ import {
 } from '../../utils/deploymentValidation';
 import { getAuthorizedBranchIds, hasUserPermission } from '../../utils/portalConfig';
 
-type ConsoleTab = 'register' | 'corrections' | 'geofence_qr' | 'rollups' | 'audit';
+type ConsoleTab = 'register' | 'fo_reports' | 'corrections' | 'geofence_qr' | 'reports' | 'audit';
+
+type VerificationSubQueue =
+  | 'ALL'
+  | 'PENDING'
+  | 'VERIFIED'
+  | 'REJECTED'
+  | 'OUTSIDE_GEOFENCE'
+  | 'MISSING_CHECKOUT'
+  | 'LATE_CHECKIN'
+  | 'EARLY_CHECKOUT'
+  | 'MANUAL_REQUESTS';
 
 const PAGE_SIZE = 10;
 
 function formatTimeShort(iso: string | null): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return formatIstTimeOnly(iso);
+}
+
+function isoTo24hInput(iso: string | null, fallback: string): string {
+  if (!iso) return fallback;
+  const formatted = formatIstTimeOnly(iso);
+  if (/^\d{2}:\d{2}$/.test(formatted)) return formatted;
+  return fallback;
 }
 
 export const AttendanceManagementPage: React.FC = () => {
@@ -84,20 +128,28 @@ export const AttendanceManagementPage: React.FC = () => {
   const today = useMemo(() => getTodayIsoDate(), []);
 
   const [activeTab, setActiveTab] = useState<ConsoleTab>('register');
+  const [subQueue, setSubQueue] = useState<VerificationSubQueue>('ALL');
   const [loading, setLoading] = useState<boolean>(true);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Records
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [corrections, setCorrections] = useState<AttendanceCorrectionRequest[]>([]);
+  const [foReports, setFoReports] = useState<AttendanceExceptionReport[]>([]);
+  const [geoApprovals, setGeoApprovals] = useState<AttendanceApprovalRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AttendanceAuditRecord[]>([]);
   const [branches, setBranches] = useState<BranchRecord[]>([]);
   const [clients, setClients] = useState<ClientRecord[]>([]);
   const [sites, setSites] = useState<SiteRecord[]>([]);
   const [employees, setEmployees] = useState<EmployeeRecord[]>([]);
+  const [policyConfig, setPolicyConfig] = useState<AttendancePolicyConfig>(() =>
+    getAttendancePolicyConfig()
+  );
 
-  // Register & Rollup Filters
-  const [rangePreset, setRangePreset] = useState<'Daily' | 'Weekly' | 'Monthly' | 'Custom'>('Monthly');
+  // Register & Report Filters
+  const [rangePreset, setRangePreset] = useState<'Daily' | 'Weekly' | 'Monthly' | 'Custom'>(
+    'Monthly'
+  );
   const [fromDate, setFromDate] = useState<string>(addDaysToIsoDate(today, -29));
   const [toDate, setToDate] = useState<string>(today);
   const [branchFilter, setBranchFilter] = useState<string>('ALL');
@@ -109,33 +161,38 @@ export const AttendanceManagementPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [page, setPage] = useState<number>(1);
 
+  // 12 Phase 4 Reports State
+  const [selectedReportType, setSelectedReportType] = useState<AttendanceReportType>(
+    'Monthly Attendance Report'
+  );
+
   // Permissions
   const isFieldOfficer = user?.role === 'field_officer';
+  const isAdmin = user?.role === 'admin';
   const canCreateManual = hasUserPermission(user, 'attendance.create');
   const canVerifyOrEdit =
+    isAdmin ||
     hasUserPermission(user, 'attendance.verify') ||
     hasUserPermission(user, 'attendance.edit') ||
     hasUserPermission(user, 'attendance.approve');
   const canReviewCorrections =
+    isAdmin ||
     hasUserPermission(user, 'attendance.correct') ||
     hasUserPermission(user, 'attendance.approve');
   const canApproveOvertime =
+    isAdmin ||
     hasUserPermission(user, 'attendance.overtime_approve') ||
     hasUserPermission(user, 'attendance.approve');
   const canExport =
-    user?.role === 'admin' ||
-    isFieldOfficer ||
-    hasUserPermission(user, 'attendance.export');
+    isAdmin || isFieldOfficer || hasUserPermission(user, 'attendance.export');
   const canEditGpsSettings =
-    user?.role === 'admin' ||
+    isAdmin ||
     hasUserPermission(user, 'attendance.gps_settings') ||
     hasUserPermission(user, 'site.edit');
   const canManageQr =
-    user?.role === 'admin' ||
-    isFieldOfficer ||
-    hasUserPermission(user, 'attendance.qr_manage');
+    isAdmin || isFieldOfficer || hasUserPermission(user, 'attendance.qr_manage');
 
-  // Modals State
+  // Shared Modal State
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
@@ -153,11 +210,16 @@ export const AttendanceManagementPage: React.FC = () => {
   const [manOutNextDay, setManOutNextDay] = useState<boolean>(false);
   const [manRemarks, setManRemarks] = useState<string>('');
 
-  // 2. Verify / Status Edit Modal
+  // 2. Enhanced HR Verify & Time Correction Modal
   const [verifyingRecord, setVerifyingRecord] = useState<AttendanceRecord | null>(null);
   const [verStatus, setVerStatus] = useState<AttendanceStatus>('Present');
+  const [verDecision, setVerDecision] = useState<AttendanceVerificationStatus>('Verified');
   const [verRemarks, setVerRemarks] = useState<string>('');
-  const [verMarkVerified, setVerMarkVerified] = useState<boolean>(true);
+  const [verCorrectTimes, setVerCorrectTimes] = useState<boolean>(false);
+  const [verCheckIn24h, setVerCheckIn24h] = useState<string>('08:00');
+  const [verCheckOut24h, setVerCheckOut24h] = useState<string>('20:00');
+  const [verCheckOutNextDay, setVerCheckOutNextDay] = useState<boolean>(false);
+  const [verCorrectionReason, setVerCorrectionReason] = useState<string>('');
 
   // 3. Overtime Approval Modal
   const [otRecord, setOtRecord] = useState<AttendanceRecord | null>(null);
@@ -165,7 +227,7 @@ export const AttendanceManagementPage: React.FC = () => {
   const [otApprovedMins, setOtApprovedMins] = useState<number>(60);
   const [otRemarks, setOtRemarks] = useState<string>('');
 
-  // 4. Field Officer Remark Modal
+  // 4. Field Officer Quick Remark Modal
   const [foRecord, setFoRecord] = useState<AttendanceRecord | null>(null);
   const [foRemarkText, setFoRemarkText] = useState<string>('');
 
@@ -179,23 +241,69 @@ export const AttendanceManagementPage: React.FC = () => {
   const [configuringSite, setConfiguringSite] = useState<SiteRecord | null>(null);
   const [geoLat, setGeoLat] = useState<string>('');
   const [geoLng, setGeoLng] = useState<string>('');
-  const [geoRadius, setGeoRadius] = useState<number>(150);
+  const [geoRadius, setGeoRadius] = useState<number>(200);
   const [geoAccThreshold, setGeoAccThreshold] = useState<number>(100);
   const [geoMandatory, setGeoMandatory] = useState<boolean>(true);
   const [geoQrEnabled, setGeoQrEnabled] = useState<boolean>(true);
 
-  // 7. Shift QR Launch Modal
+  // 7. HR Request Geofence Radius Override Modal
+  const [overrideReqSite, setOverrideReqSite] = useState<SiteRecord | null>(null);
+  const [overrideRadius, setOverrideRadius] = useState<number>(300);
+  const [overrideReason, setOverrideReason] = useState<string>('');
+
+  // 8. Admin Global Policy Modal
+  const [policyModalOpen, setPolicyModalOpen] = useState<boolean>(false);
+  const [polRadius, setPolRadius] = useState<number>(policyConfig.defaultGeofenceRadiusMeters);
+  const [polAccuracy, setPolAccuracy] = useState<number>(
+    policyConfig.defaultGpsAccuracyThresholdMeters
+  );
+  const [polCutoff, setPolCutoff] = useState<number>(policyConfig.shiftAbsentCutoffMinutes);
+  const [polOtMin, setPolOtMin] = useState<number>(policyConfig.overtimeMinimumMinutes);
+  const [polPhotoIn, setPolPhotoIn] = useState<boolean>(policyConfig.requireCheckInPhoto);
+  const [polPhotoOut, setPolPhotoOut] = useState<boolean>(policyConfig.requireCheckOutPhoto);
+
+  // 9. Field Officer Exception / Site Visit Report Modal & Review Modal
+  const [foReportModalOpen, setFoReportModalOpen] = useState<boolean>(false);
+  const [foRepType, setFoRepType] = useState<FieldOfficerExceptionType>('Missing Attendance');
+  const [foRepSiteId, setFoRepSiteId] = useState<string>('');
+  const [foRepDate, setFoRepDate] = useState<string>(today);
+  const [foRepEmpId, setFoRepEmpId] = useState<string>('');
+  const [foRepShift, setFoRepShift] = useState<string>('Day Shift');
+  const [foRepSummary, setFoRepSummary] = useState<string>('');
+  const [foRepRemarks, setFoRepRemarks] = useState<string>('');
+  const [foRepPhoto, setFoRepPhoto] = useState<CapturedAttendancePhoto | null>(null);
+  const [foCameraOpen, setFoCameraOpen] = useState<boolean>(false);
+
+  const [reviewingFoReport, setReviewingFoReport] = useState<AttendanceExceptionReport | null>(
+    null
+  );
+  const [foReviewDecision, setFoReviewDecision] = useState<'Resolved' | 'Rejected'>('Resolved');
+  const [foReviewNotes, setFoReviewNotes] = useState<string>('');
+
+  // 10. Shift QR Launch Modal
   const [qrLaunchSite, setQrLaunchSite] = useState<SiteRecord | null>(null);
-  const [qrShiftSelector, setQrShiftSelector] = useState<string>('Day Shift');
+  const [qrShiftSelector] = useState<string>('Day Shift');
   const [qrActiveModalOpen, setQrActiveModalOpen] = useState<boolean>(false);
 
   const loadAll = useCallback(async () => {
     if (!user) return;
     setLoading(true);
     try {
-      const [attList, corrList, logList, brList, clList, stList, empList] = await Promise.all([
+      const [
+        attList,
+        corrList,
+        foRepList,
+        geoAppList,
+        logList,
+        brList,
+        clList,
+        stList,
+        empList,
+      ] = await Promise.all([
         listAttendanceRecords(user, isPreviewSession),
         listAttendanceCorrectionRequests(user, isPreviewSession),
+        listAttendanceExceptionReports(user, isPreviewSession).catch(() => []),
+        listAttendanceApprovals(user, isPreviewSession).catch(() => []),
         listAttendanceAuditLogs(user, isPreviewSession),
         listBranches(user, isPreviewSession).catch(() => []),
         listClients(user, isPreviewSession).catch(() => []),
@@ -205,7 +313,10 @@ export const AttendanceManagementPage: React.FC = () => {
 
       setRecords(attList);
       setCorrections(corrList);
+      setFoReports(foRepList);
+      setGeoApprovals(geoAppList);
       setAuditLogs(logList);
+      setPolicyConfig(getAttendancePolicyConfig());
       setBranches(brList.filter((b) => !b.isDeleted));
       setClients(clList.filter((c) => !c.isArchived));
       setSites(
@@ -259,7 +370,8 @@ export const AttendanceManagementPage: React.FC = () => {
     }
   };
 
-  const filteredRecords = useMemo(() => {
+  // Base filtered records (before HR Verification Sub-Queue filter, used for Reports & Sub-Queue counts)
+  const baseFilteredRecords = useMemo(() => {
     return records.filter((r) => {
       if (fromDate && r.attendanceDate < fromDate) return false;
       if (toDate && r.attendanceDate > toDate) return false;
@@ -290,10 +402,40 @@ export const AttendanceManagementPage: React.FC = () => {
     searchQuery,
   ]);
 
+  const matchesSubQueue = useCallback((r: AttendanceRecord, q: VerificationSubQueue): boolean => {
+    const vStatus = deriveAttendanceVerificationStatus(r);
+    if (q === 'ALL') return true;
+    if (q === 'PENDING') return !r.isVerifiedByHr && vStatus === 'Pending';
+    if (q === 'VERIFIED')
+      return r.isVerifiedByHr || vStatus === 'Verified' || vStatus === 'Exception Approved';
+    if (q === 'REJECTED') return r.status === 'Rejected' || vStatus === 'Rejected';
+    if (q === 'OUTSIDE_GEOFENCE')
+      return (
+        r.verificationOutcome === 'Outside_Geofence' ||
+        r.verificationOutcome === 'Low_GPS_Accuracy' ||
+        r.status === 'Exception'
+      );
+    if (q === 'MISSING_CHECKOUT') return Boolean(r.checkInAt) && !r.checkOutAt;
+    if (q === 'LATE_CHECKIN') return r.lateArrivalMinutes > 0 || r.status === 'Late';
+    if (q === 'EARLY_CHECKOUT') return r.earlyDepartureMinutes > 0;
+    if (q === 'MANUAL_REQUESTS')
+      return (
+        r.checkInMethod === 'Manual_HR' ||
+        r.verificationOutcome === 'Manual_Override' ||
+        (r.timeCorrectionHistory?.length ?? 0) > 0
+      );
+    return true;
+  }, []);
+
+  const filteredRecords = useMemo(() => {
+    return baseFilteredRecords.filter((r) => matchesSubQueue(r, subQueue));
+  }, [baseFilteredRecords, matchesSubQueue, subQueue]);
+
   useEffect(() => {
     setPage(1);
   }, [
     activeTab,
+    subQueue,
     fromDate,
     toDate,
     branchFilter,
@@ -310,9 +452,13 @@ export const AttendanceManagementPage: React.FC = () => {
     return filteredRecords.slice(start, start + PAGE_SIZE);
   }, [filteredRecords, page]);
 
-  const rollups = useMemo(
-    () => buildEmployeeAttendanceRollups(filteredRecords),
-    [filteredRecords]
+  const reportDataset = useMemo(
+    () =>
+      buildPhase4ReportDataset({
+        reportType: selectedReportType,
+        records: baseFilteredRecords,
+      }),
+    [selectedReportType, baseFilteredRecords]
   );
 
   const pendingCorrectionsCount = useMemo(
@@ -320,19 +466,28 @@ export const AttendanceManagementPage: React.FC = () => {
     [corrections]
   );
 
+  const pendingFoReportsCount = useMemo(
+    () => foReports.filter((f) => f.status === 'Pending HR Review').length,
+    [foReports]
+  );
+
   const kpis = useMemo(() => {
-    const presentOrLate = filteredRecords.filter(
-      (r) => r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day'
+    const payrollReady = baseFilteredRecords.filter((r) => isAttendancePayrollEligible(r)).length;
+    const exceptions = baseFilteredRecords.filter(
+      (r) =>
+        r.status === 'Exception' ||
+        r.verificationOutcome === 'Outside_Geofence' ||
+        r.verificationOutcome === 'Low_GPS_Accuracy'
     ).length;
-    const exceptions = filteredRecords.filter((r) => r.status === 'Exception').length;
-    const pendingOt = filteredRecords.filter((r) => r.overtimeStatus === 'Pending').length;
+    const pendingOt = baseFilteredRecords.filter((r) => r.overtimeStatus === 'Pending').length;
+    const unverifiedCount = baseFilteredRecords.filter((r) => !r.isVerifiedByHr).length;
     return {
-      total: filteredRecords.length,
-      presentOrLate,
+      total: baseFilteredRecords.length,
+      payrollReady,
       exceptions,
-      pendingActions: pendingCorrectionsCount + pendingOt,
+      pendingActions: unverifiedCount + pendingCorrectionsCount + pendingFoReportsCount + pendingOt,
     };
-  }, [filteredRecords, pendingCorrectionsCount]);
+  }, [baseFilteredRecords, pendingCorrectionsCount, pendingFoReportsCount]);
 
   // Handlers
   const handleManualSubmit = async (e: React.FormEvent) => {
@@ -342,7 +497,10 @@ export const AttendanceManagementPage: React.FC = () => {
     setSubmitting(true);
     try {
       const needsTimes =
-        manStatus === 'Present' || manStatus === 'Late' || manStatus === 'Half Day';
+        manStatus === 'Present' ||
+        manStatus === 'Late' ||
+        manStatus === 'Half Day' ||
+        manStatus === 'On Duty';
       await recordManualHrAttendance(user, isPreviewSession, {
         employeeId: manEmployeeId,
         siteId: manSiteId,
@@ -370,21 +528,52 @@ export const AttendanceManagementPage: React.FC = () => {
     }
   };
 
+  const openVerifyModal = (r: AttendanceRecord) => {
+    setModalError(null);
+    setVerifyingRecord(r);
+    setVerStatus(
+      r.status === 'Exception' || r.status === 'Incomplete' || r.status === 'On Duty'
+        ? 'Present'
+        : r.status
+    );
+    const defaultDec: AttendanceVerificationStatus =
+      r.status === 'Rejected'
+        ? 'Rejected'
+        : r.status === 'Exception' ||
+            r.verificationOutcome === 'Outside_Geofence' ||
+            r.verificationOutcome === 'Low_GPS_Accuracy'
+          ? 'Exception Approved'
+          : 'Verified';
+    setVerDecision(defaultDec);
+    setVerRemarks(r.hrRemarks || '');
+    setVerCorrectTimes(false);
+    setVerCheckIn24h(isoTo24hInput(r.checkInAt, r.scheduledStartTime || '08:00'));
+    setVerCheckOut24h(isoTo24hInput(r.checkOutAt, r.scheduledEndTime || '20:00'));
+    setVerCheckOutNextDay(Boolean(r.crossesMidnight));
+    setVerCorrectionReason('');
+  };
+
   const handleVerifySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !verifyingRecord) return;
     setModalError(null);
     setSubmitting(true);
     try {
+      const markVer = verDecision === 'Verified' || verDecision === 'Exception Approved';
       await verifyOrUpdateAttendanceByHr(user, isPreviewSession, verifyingRecord.attendanceId, {
-        status: verStatus,
+        status: verDecision === 'Rejected' ? 'Rejected' : verStatus,
         hrRemarks: verRemarks,
-        markVerified: verMarkVerified,
+        markVerified: markVer,
+        verificationDecision: verDecision,
+        correctedCheckInTime24h: verCorrectTimes ? verCheckIn24h : undefined,
+        correctedCheckOutTime24h: verCorrectTimes ? verCheckOut24h : undefined,
+        correctedCheckOutNextDay: verCorrectTimes ? verCheckOutNextDay : undefined,
+        correctionReason: verCorrectTimes ? verCorrectionReason : undefined,
       });
       setVerifyingRecord(null);
       setBanner({
         type: 'success',
-        text: `Attendance ${verifyingRecord.attendanceId} updated (${verStatus}) and audit-logged.`,
+        text: `Attendance ${verifyingRecord.attendanceId} updated (${verDecision}) and synced with payroll eligibility gate.`,
       });
     } catch (err) {
       setModalError(formatServiceErrorMessage(err));
@@ -466,6 +655,85 @@ export const AttendanceManagementPage: React.FC = () => {
     }
   };
 
+  const handleCreateFoReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setModalError(null);
+    setSubmitting(true);
+    try {
+      let photoUrl = '';
+      let photoStoragePath = '';
+      const siteObj = sites.find((s) => s.siteId === foRepSiteId);
+      if (foRepPhoto) {
+        const uploaded = await uploadAttendanceVerificationPhoto(
+          user,
+          isPreviewSession,
+          foRepPhoto.file,
+          {
+            branchId: siteObj?.branchId || user.branchId,
+            employeeId: foRepEmpId || user.uid,
+            siteId: foRepSiteId,
+            photoType: 'field_report',
+            cameraFacing: foRepPhoto.cameraFacing,
+          }
+        );
+        photoUrl = uploaded.previewUrl;
+        photoStoragePath = uploaded.storagePath;
+      }
+
+      const created = await submitFieldOfficerExceptionReport(user, isPreviewSession, {
+        reportType: foRepType,
+        siteId: foRepSiteId,
+        attendanceDate: foRepDate,
+        employeeId: foRepEmpId || undefined,
+        shiftType: foRepShift,
+        summary: foRepSummary,
+        remarks: foRepRemarks,
+        photoUrl,
+        photoStoragePath,
+      });
+
+      setFoReportModalOpen(false);
+      setFoRepSummary('');
+      setFoRepRemarks('');
+      setFoRepEmpId('');
+      setFoRepPhoto(null);
+      setBanner({
+        type: 'success',
+        text: `Field report ${created.exceptionId} (${created.reportType}) submitted to HR review queue.`,
+      });
+    } catch (err) {
+      setModalError(formatServiceErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleReviewFoReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !reviewingFoReport) return;
+    setModalError(null);
+    setSubmitting(true);
+    try {
+      await reviewFieldOfficerExceptionReport(
+        user,
+        isPreviewSession,
+        reviewingFoReport.exceptionId,
+        foReviewDecision,
+        foReviewNotes
+      );
+      setReviewingFoReport(null);
+      setBanner({
+        type: 'success',
+        text: `Field report ${reviewingFoReport.exceptionId} marked ${foReviewDecision} and audit-logged.`,
+      });
+    } catch (err) {
+      setModalError(formatServiceErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const openGeoConfigModal = (s: SiteRecord) => {
     const resolved = resolveSiteGeoSettings(s);
     setModalError(null);
@@ -524,102 +792,113 @@ export const AttendanceManagementPage: React.FC = () => {
     }
   };
 
-  const exportRegister = (format: 'csv' | 'excel') => {
-    const headers = [
-      'Attendance ID',
-      'Date',
-      'Employee ID',
-      'Employee Name',
-      'Designation',
-      'Service Category',
-      'Site',
-      'Client',
-      'Shift',
-      'Check-In',
-      'Check-Out',
-      'Method',
-      'Verification Outcome',
-      'Distance (m)',
-      'Net Hours',
-      'Late Mins',
-      'Early Out Mins',
-      'Overtime Mins',
-      'OT Status',
-      'Status',
-      'HR Verified',
-    ];
-    const rows = filteredRecords.map((r) => [
-      r.attendanceId,
-      r.attendanceDate,
-      r.employeeId,
-      r.employeeName,
-      r.designationName,
-      r.serviceCategory,
-      r.siteName,
-      r.clientName,
-      r.shiftType,
-      formatTimeShort(r.checkInAt),
-      formatTimeShort(r.checkOutAt),
-      r.checkInMethod || '—',
-      r.verificationOutcome,
-      r.checkInGeo?.distanceMeters ?? '—',
-      r.totalDutyHours,
-      r.lateArrivalMinutes,
-      r.earlyDepartureMinutes,
-      r.overtimeMinutes,
-      r.overtimeStatus,
-      r.status,
-      r.isVerifiedByHr ? 'Yes' : 'No',
-    ]);
-    if (format === 'csv') {
-      exportTableToCsv('rexon-attendance-register', headers, rows);
-    } else {
-      exportTableToExcelXml('rexon-attendance-register', 'Attendance Register', headers, rows);
+  const handleRequestRadiusOverride = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !overrideReqSite) return;
+    setModalError(null);
+    setSubmitting(true);
+    try {
+      const created = await requestSiteGeofenceOverrideApproval(user, isPreviewSession, {
+        siteId: overrideReqSite.siteId,
+        requestedRadiusMeters: overrideRadius,
+        reason: overrideReason,
+      });
+      setOverrideReqSite(null);
+      setOverrideReason('');
+      setBanner({
+        type: 'success',
+        text: `Geofence radius override request ${created.approvalId} routed to Administrator queue.`,
+      });
+    } catch (err) {
+      setModalError(formatServiceErrorMessage(err));
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const exportRollups = (format: 'csv' | 'excel') => {
-    const headers = [
-      'Employee ID',
-      'Employee Name',
-      'Branch',
-      'Primary Site',
-      'Designation',
-      'Present Days',
-      'Late Days',
-      'Half Days',
-      'Absent Days',
-      'Weekly Off',
-      'Holiday',
-      'Leave',
-      'Exceptions',
-      'Total Net Hours',
-      'Approved OT Hours',
-      'Pending OT Hours',
-    ];
-    const rows = rollups.map((r) => [
-      r.employeeId,
-      r.employeeName,
-      r.branchId,
-      r.siteName,
-      r.designationName,
-      r.presentDays,
-      r.lateDays,
-      r.halfDays,
-      r.absentDays,
-      r.weeklyOffDays,
-      r.holidayDays,
-      r.leaveDays,
-      r.exceptionDays,
-      r.totalNetHours,
-      r.approvedOvertimeHours,
-      r.pendingOvertimeHours,
-    ]);
-    if (format === 'csv') {
-      exportTableToCsv('rexon-attendance-summary', headers, rows);
-    } else {
-      exportTableToExcelXml('rexon-attendance-summary', 'Attendance Summary', headers, rows);
+  const handleAdminDecideGeoApproval = async (
+    approvalId: string,
+    decision: 'Approved' | 'Rejected'
+  ) => {
+    if (!user) return;
+    try {
+      await reviewAttendanceApproval(
+        user,
+        isPreviewSession,
+        approvalId,
+        decision,
+        `${decision} from Attendance Geofence Console`
+      );
+      setBanner({
+        type: 'success',
+        text: `Geofence override request ${approvalId} ${decision.toLowerCase()}.`,
+      });
+    } catch (err) {
+      setBanner({ type: 'error', text: formatServiceErrorMessage(err) });
     }
+  };
+
+  const handleSaveGlobalPolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setModalError(null);
+    setSubmitting(true);
+    try {
+      const updated = await saveAttendancePolicyConfig(user, isPreviewSession, {
+        defaultGeofenceRadiusMeters: polRadius,
+        defaultGpsAccuracyThresholdMeters: polAccuracy,
+        shiftAbsentCutoffMinutes: polCutoff,
+        overtimeMinimumMinutes: polOtMin,
+        requireCheckInPhoto: polPhotoIn,
+        requireCheckOutPhoto: polPhotoOut,
+      });
+      setPolicyConfig(updated);
+      setPolicyModalOpen(false);
+      setBanner({
+        type: 'success',
+        text: `Saved global attendance policy (Default Geofence: ${updated.defaultGeofenceRadiusMeters}m).`,
+      });
+    } catch (err) {
+      setModalError(formatServiceErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const exportCurrentReport = (mode: 'pdf_print' | 'pdf_download' | 'csv' | 'excel') => {
+    const headers = reportDataset.columns.map((c) => c.header);
+    const slug = selectedReportType.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+    if (mode === 'csv') {
+      exportTableToCsv(`rexon-${slug}`, headers, reportDataset.rows);
+      return;
+    }
+    if (mode === 'excel') {
+      exportTableToExcelXml(`rexon-${slug}`, selectedReportType.slice(0, 30), headers, reportDataset.rows);
+      return;
+    }
+
+    const branchObj = branches.find((b) => b.branchId === branchFilter);
+    const clientObj = clients.find((c) => c.clientId === clientFilter);
+    const siteObj = sites.find((s) => s.siteId === siteFilter);
+
+    exportBrandedAttendancePdf(
+      {
+        reportTitle: selectedReportType,
+        reportPeriod: `${fromDate} to ${toDate}`,
+        branchName: branchObj ? `${branchObj.branchName} (${branchObj.branchId})` : undefined,
+        clientName: clientObj ? clientObj.companyName : undefined,
+        siteName: siteObj ? `${siteObj.siteName} (${siteObj.siteId})` : undefined,
+        generatedBy: user ? `${user.fullName} (${user.role})` : 'REXON HR Portal',
+        summaryMetrics: reportDataset.summaryMetrics,
+        columns: reportDataset.columns,
+        rows: reportDataset.rows,
+        footerNote:
+          'Payroll Readiness Rule: Only attendance records verified or exception-approved by HR are eligible for Phase 5 payroll calculation.',
+        fileNamePrefix: `rexon-${slug}`,
+      },
+      mode === 'pdf_print' ? 'print' : 'download'
+    );
   };
 
   if (!user) return null;
@@ -631,38 +910,47 @@ export const AttendanceManagementPage: React.FC = () => {
         <div>
           <h1 className="font-display text-2xl sm:text-3xl font-bold text-[#1F1916]">
             {isFieldOfficer
-              ? 'Site Attendance & Shift QR Monitor'
-              : 'Attendance & Duty Verification Console'}
+              ? 'Site Attendance, Field Reports & Shift QR'
+              : 'Attendance, Verification & Reports Console'}
           </h1>
           <p className="mt-1 text-sm text-[#574B43]">
             {isFieldOfficer
-              ? 'Monitor real-time guard & workforce turnout across assigned sites, generate rotating shift QR codes, and log field observations.'
-              : 'Server-verified GPS geofencing, rotating shift QR logs, missing punch corrections, overtime approvals, and payroll-ready rollups.'}
+              ? 'Monitor real-time guard & workforce turnout across assigned sites, submit field reports with photos, and launch rotating shift QR codes.'
+              : 'GPS geofence & photo verification, HR time corrections, Field Officer reports, overtime approvals, and 12 branded attendance reports.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {canExport && (
-            <>
-              <button
-                type="button"
-                disabled={filteredRecords.length === 0}
-                onClick={() => exportRegister('csv')}
-                className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5 text-[#5C3D2E]" />
-                <span>Download CSV</span>
-              </button>
-              <button
-                type="button"
-                disabled={filteredRecords.length === 0}
-                onClick={() => exportRegister('excel')}
-                className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-[#5C3D2E]" />
-                <span>Export Excel</span>
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('reports');
+              }}
+              className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
+            >
+              <Printer className="w-3.5 h-3.5 text-[#5C3D2E]" />
+              <span>12 Branded PDF / Excel Reports</span>
+            </button>
+          )}
+
+          {(isFieldOfficer || isAdmin || user.role === 'hr') && (
+            <button
+              type="button"
+              onClick={() => {
+                setModalError(null);
+                setFoRepSiteId(sites[0]?.siteId || '');
+                setFoRepDate(today);
+                setFoRepSummary('');
+                setFoRepRemarks('');
+                setFoRepPhoto(null);
+                setFoReportModalOpen(true);
+              }}
+              className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap"
+            >
+              <FileWarning className="w-3.5 h-3.5" />
+              <span>Log Field Report</span>
+            </button>
           )}
 
           {canCreateManual && (
@@ -676,7 +964,7 @@ export const AttendanceManagementPage: React.FC = () => {
                 setManRemarks('');
                 setManualOpen(true);
               }}
-              className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+              className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
             >
               <Plus className="w-4 h-4" />
               <span>Record HR Attendance</span>
@@ -713,22 +1001,22 @@ export const AttendanceManagementPage: React.FC = () => {
           icon={CalendarCheck}
         />
         <StatMetricCard
-          label="Present / On-Duty"
-          value={kpis.presentOrLate}
-          subtext="Verified Present, Late & Half-Day shifts"
+          label="Payroll-Ready (HR Verified)"
+          value={kpis.payrollReady}
+          subtext="Verified shifts cleared for Phase 5 payroll"
           icon={CheckCircle2}
         />
         <StatMetricCard
-          label="Geofence Exceptions"
+          label="Geofence / GPS Exceptions"
           value={kpis.exceptions}
-          subtext="Outside-radius / low-accuracy punches"
+          subtext="Outside-radius or low-accuracy punches"
           icon={AlertTriangle}
           tone={kpis.exceptions > 0 ? 'attention' : 'default'}
         />
         <StatMetricCard
-          label="Pending Approvals"
+          label="Pending HR Actions"
           value={kpis.pendingActions}
-          subtext="Corrections & overtime awaiting review"
+          subtext="Unverified logs, corrections, FO & OT items"
           icon={Clock}
           tone={kpis.pendingActions > 0 ? 'attention' : 'default'}
         />
@@ -738,15 +1026,20 @@ export const AttendanceManagementPage: React.FC = () => {
       <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-[#F3EDE4] border border-[#E5DDD2] rounded-xl">
         {(
           [
-            { key: 'register', label: 'Attendance Register', icon: ClipboardCheck },
+            { key: 'register', label: 'Attendance & HR Verification', icon: ClipboardCheck },
+            {
+              key: 'fo_reports',
+              label: `Field Officer Reports (${pendingFoReportsCount})`,
+              icon: FileWarning,
+            },
             {
               key: 'corrections',
-              label: `Corrections & Missing Punches (${pendingCorrectionsCount})`,
+              label: `Corrections (${pendingCorrectionsCount})`,
               icon: AlertTriangle,
             },
-            { key: 'geofence_qr', label: 'Site Geofence & Shift QR', icon: MapPin },
-            { key: 'rollups', label: 'Weekly & Monthly Summary', icon: CalendarCheck },
-            { key: 'audit', label: 'Audit Trail', icon: History },
+            { key: 'geofence_qr', label: 'Geofence Policy & Shift QR', icon: MapPin },
+            { key: 'reports', label: '12 Reports & Branded PDF', icon: FileText },
+            { key: 'audit', label: 'Audit History', icon: History },
           ] as const
         ).map((tab) => {
           const Icon = tab.icon;
@@ -756,7 +1049,7 @@ export const AttendanceManagementPage: React.FC = () => {
               key={tab.key}
               type="button"
               onClick={() => setActiveTab(tab.key)}
-              className={`min-h-[38px] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+              className={`min-h-[40px] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                 active
                   ? 'bg-[#5C3D2E] text-white'
                   : 'text-[#574B43] hover:text-[#1F1916] hover:bg-white/60'
@@ -769,9 +1062,9 @@ export const AttendanceManagementPage: React.FC = () => {
         })}
       </div>
 
-      {/* TAB 1: ATTENDANCE REGISTER */}
-      {activeTab === 'register' && (
-        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
+      {/* SHARED DATE / BRANCH / CLIENT / SITE FILTER BAR FOR REGISTER & REPORTS */}
+      {(activeTab === 'register' || activeTab === 'reports') && (
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-4 sm:p-5 space-y-3">
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg self-start">
               {(['Daily', 'Weekly', 'Monthly'] as const).map((preset) => (
@@ -779,13 +1072,13 @@ export const AttendanceManagementPage: React.FC = () => {
                   key={preset}
                   type="button"
                   onClick={() => applyDatePreset(preset)}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-md whitespace-nowrap ${
+                  className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold rounded-md whitespace-nowrap ${
                     rangePreset === preset
                       ? 'bg-[#5C3D2E] text-white'
                       : 'text-[#574B43] hover:text-[#1F1916]'
                   }`}
                 >
-                  {preset} View
+                  {preset} Window
                 </button>
               ))}
             </div>
@@ -796,13 +1089,13 @@ export const AttendanceManagementPage: React.FC = () => {
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search employee, site, attendance ID..."
+                placeholder="Search employee, site, client, attendance ID..."
                 className="w-full min-h-[40px] pl-9 pr-3 py-2 text-xs bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
             <div>
               <label className="block text-[11px] font-semibold text-[#574B43] mb-1">From</label>
               <input
@@ -843,6 +1136,21 @@ export const AttendanceManagementPage: React.FC = () => {
               </select>
             </div>
             <div>
+              <label className="block text-[11px] font-semibold text-[#574B43] mb-1">Client</label>
+              <select
+                value={clientFilter}
+                onChange={(e) => setClientFilter(e.target.value)}
+                className="w-full min-h-[38px] px-2.5 py-1.5 text-xs bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+              >
+                <option value="ALL">All Clients</option>
+                {clients.map((c) => (
+                  <option key={c.clientId} value={c.clientId}>
+                    {c.companyName}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="block text-[11px] font-semibold text-[#574B43] mb-1">Site</label>
               <select
                 value={siteFilter}
@@ -866,7 +1174,7 @@ export const AttendanceManagementPage: React.FC = () => {
                 onChange={(e) => setCategoryFilter(e.target.value)}
                 className="w-full min-h-[38px] px-2.5 py-1.5 text-xs bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
               >
-                <option value="ALL">All Categories</option>
+                <option value="ALL">All Services</option>
                 {SERVICE_CATEGORIES.map((c) => (
                   <option key={c} value={c}>
                     {c}
@@ -890,6 +1198,53 @@ export const AttendanceManagementPage: React.FC = () => {
               </select>
             </div>
           </div>
+        </section>
+      )}
+
+      {/* TAB 1: ATTENDANCE REGISTER & HR VERIFICATION QUEUES */}
+      {activeTab === 'register' && (
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
+          {/* HR Verification Sub-Queues */}
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-[#574B43]">
+              HR Verification Queues (Select queue to inspect pending, geofence, or missing-punch
+              records)
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 p-1 bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg">
+              {(
+                [
+                  { id: 'ALL', label: 'All' },
+                  { id: 'PENDING', label: 'Pending' },
+                  { id: 'VERIFIED', label: 'Verified' },
+                  { id: 'REJECTED', label: 'Rejected' },
+                  { id: 'OUTSIDE_GEOFENCE', label: 'Outside Geofence' },
+                  { id: 'MISSING_CHECKOUT', label: 'Missing Check-out' },
+                  { id: 'LATE_CHECKIN', label: 'Late Check-in' },
+                  { id: 'EARLY_CHECKOUT', label: 'Early Check-out' },
+                  { id: 'MANUAL_REQUESTS', label: 'Manual / Corrected' },
+                ] as const
+              ).map((qItem) => {
+                const count = baseFilteredRecords.filter((r) =>
+                  matchesSubQueue(r, qItem.id)
+                ).length;
+                const active = subQueue === qItem.id;
+                return (
+                  <button
+                    key={qItem.id}
+                    type="button"
+                    onClick={() => setSubQueue(qItem.id)}
+                    className={`min-h-[36px] px-2.5 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+                      active
+                        ? 'bg-[#5C3D2E] text-white'
+                        : 'text-[#574B43] hover:text-[#1F1916] hover:bg-white'
+                    }`}
+                  >
+                    {qItem.label} ({count})
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {loading ? (
             <div className="py-12 text-center text-xs text-[#574B43]">
@@ -898,8 +1253,8 @@ export const AttendanceManagementPage: React.FC = () => {
           ) : filteredRecords.length === 0 ? (
             <EmptyStatePanel
               icon={CalendarCheck}
-              title="No Attendance Records in Selected Filter"
-              description="Employee GPS/QR check-ins and manual HR duty entries (Present, Weekly Off, Holiday, Leave) appear here immediately."
+              title="No Attendance Records in Selected Queue"
+              description="Switch verification sub-queues above or widen your date range to inspect employee GPS/photo/QR attendance records."
               actionLabel={canCreateManual ? 'Record HR Attendance' : undefined}
               onAction={
                 canCreateManual
@@ -921,163 +1276,180 @@ export const AttendanceManagementPage: React.FC = () => {
                       <th className="py-3 px-3">Personnel</th>
                       <th className="py-3 px-3">Site</th>
                       <th className="py-3 px-3">In / Out</th>
-                      <th className="py-3 px-3">Verification</th>
+                      <th className="py-3 px-3">GPS &amp; Photo</th>
                       <th className="py-3 px-3 text-right">Hours &amp; OT</th>
-                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3">Verification &amp; Payroll</th>
                       <th className="py-3 px-3 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E5DDD2] text-sm">
-                    {paginatedRecords.map((r) => (
-                      <tr key={r.attendanceId} className="hover:bg-[#FAF8F5]">
-                        <td className="py-3 px-3 align-top">
-                          <div className="font-mono-tabular text-xs font-semibold text-[#1F1916] whitespace-nowrap">
-                            {r.attendanceDate}
-                          </div>
-                          <div className="text-xs text-[#574B43]">
-                            {r.shiftType} ({r.scheduledStartTime}–{r.scheduledEndTime}
-                            {r.crossesMidnight ? '+1d' : ''})
-                          </div>
-                          <div className="font-mono-tabular text-[11px] text-[#7D6F65]">
-                            {r.attendanceId}
-                          </div>
-                        </td>
-
-                        <td className="py-3 px-3 align-top">
-                          <div className="font-medium text-[#1F1916]">{r.employeeName}</div>
-                          <div className="text-xs text-[#574B43] font-mono-tabular">
-                            {r.employeeId} · {r.designationName}
-                          </div>
-                        </td>
-
-                        <td className="py-3 px-3 align-top">
-                          <div className="font-medium text-[#1F1916]">{r.siteName}</div>
-                          <div className="text-xs text-[#574B43]">{r.clientName}</div>
-                          {r.fieldOfficerRemarks && (
-                            <div className="text-[11px] text-[#5C3D2E] mt-0.5">
-                              FO: {r.fieldOfficerRemarks}
+                    {paginatedRecords.map((r) => {
+                      const locStatus = deriveAttendanceLocationStatus(r);
+                      const verDecisionLabel = deriveAttendanceVerificationStatus(r);
+                      const payrollReady = isAttendancePayrollEligible(r);
+                      return (
+                        <tr key={r.attendanceId} className="hover:bg-[#FAF8F5]">
+                          <td className="py-3 px-3 align-top">
+                            <div className="font-mono-tabular text-xs font-semibold text-[#1F1916] whitespace-nowrap">
+                              {r.attendanceDate}
                             </div>
-                          )}
-                        </td>
-
-                        <td className="py-3 px-3 align-top font-mono-tabular text-xs whitespace-nowrap">
-                          <div>In: {formatTimeShort(r.checkInAt)}</div>
-                          <div>Out: {formatTimeShort(r.checkOutAt)}</div>
-                          {(r.lateArrivalMinutes > 0 || r.earlyDepartureMinutes > 0) && (
-                            <div className="text-[11px] text-[#B45309]">
-                              {r.lateArrivalMinutes > 0 ? `Late ${r.lateArrivalMinutes}m ` : ''}
-                              {r.earlyDepartureMinutes > 0
-                                ? `Early ${r.earlyDepartureMinutes}m`
-                                : ''}
+                            <div className="text-xs text-[#574B43]">
+                              {r.shiftType} ({r.scheduledStartTime}–{r.scheduledEndTime}
+                              {r.crossesMidnight ? '+1d' : ''})
                             </div>
-                          )}
-                        </td>
-
-                        <td className="py-3 px-3 align-top text-xs">
-                          <div className="font-medium text-[#1F1916]">
-                            {r.checkInMethod || '—'} · {r.verificationOutcome}
-                          </div>
-                          {r.checkInGeo && r.checkInGeo.distanceMeters !== null && (
-                            <div className="font-mono-tabular text-[11px] text-[#574B43]">
-                              Dist: {r.checkInGeo.distanceMeters}m / {r.checkInGeo.allowedRadiusMeters}
-                              m
+                            <div className="font-mono-tabular text-[11px] text-[#7D6F65]">
+                              {r.attendanceId}
                             </div>
-                          )}
-                          {r.exceptionReason && (
-                            <div className="text-[11px] text-[#B91C1C] max-w-[180px] truncate">
-                              Note: {r.exceptionReason}
-                            </div>
-                          )}
-                        </td>
+                          </td>
 
-                        <td className="py-3 px-3 align-top text-right font-mono-tabular text-xs whitespace-nowrap">
-                          <div className="font-semibold text-[#1F1916]">{r.totalDutyHours}h</div>
-                          {r.overtimeMinutes > 0 && (
+                          <td className="py-3 px-3 align-top">
+                            <div className="font-medium text-[#1F1916]">{r.employeeName}</div>
+                            <div className="text-xs text-[#574B43] font-mono-tabular">
+                              {r.employeeId} · {r.designationName}
+                            </div>
+                          </td>
+
+                          <td className="py-3 px-3 align-top">
+                            <div className="font-medium text-[#1F1916]">{r.siteName}</div>
+                            <div className="text-xs text-[#574B43]">{r.clientName}</div>
+                            {r.fieldOfficerRemarks && (
+                              <div className="text-[11px] text-[#5C3D2E] mt-0.5">
+                                FO: {r.fieldOfficerRemarks}
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-3 align-top font-mono-tabular text-xs whitespace-nowrap">
+                            <div>In: {formatTimeShort(r.checkInAt)}</div>
+                            <div>Out: {formatTimeShort(r.checkOutAt)}</div>
+                            {(r.lateArrivalMinutes > 0 || r.earlyDepartureMinutes > 0) && (
+                              <div className="text-[11px] text-[#B45309]">
+                                {r.lateArrivalMinutes > 0 ? `Late ${r.lateArrivalMinutes}m ` : ''}
+                                {r.earlyDepartureMinutes > 0
+                                  ? `Early ${r.earlyDepartureMinutes}m`
+                                  : ''}
+                              </div>
+                            )}
+                            {(r.timeCorrectionHistory?.length ?? 0) > 0 && (
+                              <div className="text-[11px] text-[#5C3D2E]">
+                                Time Corrected ({r.timeCorrectionHistory?.length})
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-3 align-top text-xs">
+                            <div className="font-medium text-[#1F1916]">
+                              {r.checkInMethod || '—'} · {locStatus}
+                            </div>
+                            {r.checkInGeo && r.checkInGeo.distanceMeters !== null && (
+                              <div className="font-mono-tabular text-[11px] text-[#574B43]">
+                                Dist: {r.checkInGeo.distanceMeters}m /{' '}
+                                {r.checkInGeo.allowedRadiusMeters}m
+                              </div>
+                            )}
+                            {(r.checkInPhoto?.previewUrl || r.checkOutPhoto?.previewUrl) && (
+                              <div className="text-[11px] text-[#5C3D2E] mt-0.5">
+                                {r.checkInPhoto?.previewUrl ? 'Photo In' : ''}
+                                {r.checkInPhoto?.previewUrl && r.checkOutPhoto?.previewUrl
+                                  ? ' · '
+                                  : ''}
+                                {r.checkOutPhoto?.previewUrl ? 'Photo Out' : ''}
+                              </div>
+                            )}
+                            {r.exceptionReason && (
+                              <div className="text-[11px] text-[#B91C1C] max-w-[180px] truncate">
+                                Note: {r.exceptionReason}
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-3 align-top text-right font-mono-tabular text-xs whitespace-nowrap">
+                            <div className="font-semibold text-[#1F1916]">{r.totalDutyHours}h</div>
+                            {r.overtimeMinutes > 0 && (
+                              <div
+                                className={`text-[11px] ${
+                                  r.overtimeStatus === 'Approved'
+                                    ? 'text-[#166534]'
+                                    : r.overtimeStatus === 'Pending'
+                                      ? 'text-[#B45309]'
+                                      : 'text-[#7D6F65]'
+                                }`}
+                              >
+                                OT {r.overtimeMinutes}m ({r.overtimeStatus})
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="py-3 px-3 align-top text-xs whitespace-nowrap">
                             <div
-                              className={`text-[11px] ${
-                                r.overtimeStatus === 'Approved'
+                              className={`font-semibold ${
+                                r.status === 'Present' || r.status === 'On Duty'
                                   ? 'text-[#166534]'
-                                  : r.overtimeStatus === 'Pending'
-                                    ? 'text-[#B45309]'
-                                    : 'text-[#7D6F65]'
+                                  : r.status === 'Exception' ||
+                                      r.status === 'Absent' ||
+                                      r.status === 'Rejected'
+                                    ? 'text-[#B91C1C]'
+                                    : 'text-[#B45309]'
                               }`}
                             >
-                              OT {r.overtimeMinutes}m ({r.overtimeStatus})
+                              {r.status} · {verDecisionLabel}
                             </div>
-                          )}
-                        </td>
+                            <div
+                              className={`text-[11px] ${
+                                payrollReady ? 'text-[#166534] font-medium' : 'text-[#7D6F65]'
+                              }`}
+                            >
+                              {payrollReady ? 'Payroll Ready' : 'Excluded from Payroll'}
+                            </div>
+                          </td>
 
-                        <td className="py-3 px-3 align-top text-xs whitespace-nowrap">
-                          <div
-                            className={`font-semibold ${
-                              r.status === 'Present'
-                                ? 'text-[#166534]'
-                                : r.status === 'Exception' || r.status === 'Absent'
-                                  ? 'text-[#B91C1C]'
-                                  : 'text-[#B45309]'
-                            }`}
-                          >
-                            {r.status}
-                          </div>
-                          <div className="text-[11px] text-[#7D6F65]">
-                            {r.isVerifiedByHr ? 'HR Verified' : 'Unverified'}
-                          </div>
-                        </td>
+                          <td className="py-3 px-3 align-top text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {canVerifyOrEdit && (
+                                <button
+                                  type="button"
+                                  onClick={() => openVerifyModal(r)}
+                                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+                                >
+                                  Verify / Edit
+                                </button>
+                              )}
 
-                        <td className="py-3 px-3 align-top text-right whitespace-nowrap">
-                          <div className="inline-flex items-center justify-end gap-1.5">
-                            {canVerifyOrEdit && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setModalError(null);
-                                  setVerifyingRecord(r);
-                                  setVerStatus(
-                                    r.status === 'Exception' ? 'Present' : r.status
-                                  );
-                                  setVerRemarks(r.hrRemarks || '');
-                                  setVerMarkVerified(true);
-                                }}
-                                className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
-                              >
-                                Verify
-                              </button>
-                            )}
+                              {canApproveOvertime && r.overtimeMinutes >= 15 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setModalError(null);
+                                    setOtRecord(r);
+                                    setOtDecision('Approved');
+                                    setOtApprovedMins(r.overtimeMinutes);
+                                    setOtRemarks('');
+                                  }}
+                                  className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap"
+                                >
+                                  OT
+                                </button>
+                              )}
 
-                            {canApproveOvertime && r.overtimeMinutes >= 15 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setModalError(null);
-                                  setOtRecord(r);
-                                  setOtDecision('Approved');
-                                  setOtApprovedMins(r.overtimeMinutes);
-                                  setOtRemarks('');
-                                }}
-                                className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap"
-                              >
-                                OT
-                              </button>
-                            )}
-
-                            {(isFieldOfficer || user.role === 'admin') && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setModalError(null);
-                                  setFoRecord(r);
-                                  setFoRemarkText('');
-                                }}
-                                className="min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
-                              >
-                                <MessageSquarePlus className="w-3.5 h-3.5 text-[#5C3D2E]" />
-                                <span>Remark</span>
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                              {(isFieldOfficer || isAdmin) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setModalError(null);
+                                    setFoRecord(r);
+                                    setFoRemarkText('');
+                                  }}
+                                  className="min-h-[38px] inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
+                                >
+                                  <MessageSquarePlus className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                                  <span>Remark</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1093,7 +1465,142 @@ export const AttendanceManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* TAB 2: CORRECTIONS & MISSING PUNCHES */}
+      {/* TAB 2: FIELD OFFICER MONITORING & SITE REPORTS */}
+      {activeTab === 'fo_reports' && (
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-semibold text-[#1F1916]">
+                Field Officer Site Monitoring &amp; Replacement Reports
+              </h2>
+              <p className="text-xs text-[#574B43]">
+                Missing Attendance, Attendance Issues, Site Visit Reports, and Employee Replacement
+                Requirements reported from the field.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setModalError(null);
+                setFoRepSiteId(sites[0]?.siteId || '');
+                setFoRepDate(today);
+                setFoReportModalOpen(true);
+              }}
+              className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap self-start sm:self-auto"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Submit Field Report</span>
+            </button>
+          </div>
+
+          {foReports.length === 0 ? (
+            <EmptyStatePanel
+              icon={FileWarning}
+              title="No Field Officer Reports Logged Yet"
+              description="Field Officers can log Missing Attendance, Site Visit Reports, and Replacement Requirements with photo verification here."
+              actionLabel="Submit Field Report"
+              onAction={() => {
+                setModalError(null);
+                setFoRepSiteId(sites[0]?.siteId || '');
+                setFoReportModalOpen(true);
+              }}
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-y border-[#E5DDD2] bg-[#FAF8F5] text-xs font-semibold text-[#574B43]">
+                    <th className="py-3 px-3">Ref &amp; Date</th>
+                    <th className="py-3 px-3">Type &amp; Site</th>
+                    <th className="py-3 px-3">Summary &amp; Field Observations</th>
+                    <th className="py-3 px-3">Photo</th>
+                    <th className="py-3 px-3">Status</th>
+                    <th className="py-3 px-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E5DDD2] text-sm">
+                  {foReports.map((rep) => (
+                    <tr key={rep.exceptionId} className="hover:bg-[#FAF8F5]">
+                      <td className="py-3 px-3 font-mono-tabular text-xs whitespace-nowrap">
+                        <div className="font-semibold text-[#5C3D2E]">{rep.exceptionId}</div>
+                        <div className="text-[#574B43]">{rep.attendanceDate}</div>
+                        <div className="text-[11px] text-[#7D6F65]">{rep.reportedByName}</div>
+                      </td>
+                      <td className="py-3 px-3 text-xs">
+                        <div className="font-semibold text-[#1F1916]">{rep.reportType}</div>
+                        <div className="text-[#574B43]">
+                          {rep.siteName} · {rep.shiftType}
+                        </div>
+                        {rep.employeeName && (
+                          <div className="font-mono-tabular text-[#5C3D2E]">
+                            Personnel: {rep.employeeName} ({rep.employeeId})
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-xs text-[#1F1916] max-w-sm">
+                        <div className="font-medium">{rep.summary}</div>
+                        <div className="text-[#574B43] mt-0.5">{rep.remarks}</div>
+                        {rep.hrResolutionNotes && (
+                          <div className="text-[#5C3D2E] mt-1">
+                            HR Resolution: {rep.hrResolutionNotes}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3 px-3">
+                        {rep.photoUrl ? (
+                          <img
+                            src={rep.photoUrl}
+                            alt={`Field report ${rep.exceptionId}`}
+                            referrerPolicy="no-referrer"
+                            className="w-12 h-12 rounded-lg object-cover border border-[#D4C7B8]"
+                          />
+                        ) : (
+                          <span className="text-xs text-[#7D6F65]">—</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-xs font-semibold whitespace-nowrap">
+                        <span
+                          className={
+                            rep.status === 'Resolved'
+                              ? 'text-[#166534]'
+                              : rep.status === 'Rejected'
+                                ? 'text-[#B91C1C]'
+                                : 'text-[#B45309]'
+                          }
+                        >
+                          {rep.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                        {rep.status === 'Pending HR Review' && canVerifyOrEdit && !isFieldOfficer ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setModalError(null);
+                              setReviewingFoReport(rep);
+                              setFoReviewDecision('Resolved');
+                              setFoReviewNotes('');
+                            }}
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+                          >
+                            Resolve
+                          </button>
+                        ) : (
+                          <span className="text-xs text-[#7D6F65]">
+                            {rep.reviewedByName ? `By ${rep.reviewedByName}` : '—'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* TAB 3: CORRECTIONS & MISSING PUNCHES */}
       {activeTab === 'corrections' && (
         <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
           <div>
@@ -1102,7 +1609,8 @@ export const AttendanceManagementPage: React.FC = () => {
             </h2>
             <p className="text-xs text-[#574B43]">
               Review employee missing check-in/out requests and geofence exceptions. Approved
-              corrections automatically recalculate net duty hours and mark HR verification.
+              corrections recalculate net duty hours, mark HR verification, and unlock payroll
+              eligibility.
             </p>
           </div>
 
@@ -1174,7 +1682,7 @@ export const AttendanceManagementPage: React.FC = () => {
                               setCorrDecision('Approved');
                               setCorrRemarks('');
                             }}
-                            className="min-h-[34px] px-3 py-1 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+                            className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
                           >
                             Review
                           </button>
@@ -1193,19 +1701,41 @@ export const AttendanceManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* TAB 3: SITE GEOFENCE & SHIFT QR */}
+      {/* TAB 4: SITE GEOFENCE, POLICY & SHIFT QR */}
       {activeTab === 'geofence_qr' && (
-        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-                Site Geofence Boundaries &amp; Rotating Shift QR Access
+                Site Geofence Boundaries, Policy Defaults &amp; Rotating Shift QR
               </h2>
               <p className="text-xs text-[#574B43]">
-                Configure per-site GPS coordinates, allowed geofence radius (meters), GPS accuracy
-                thresholds, and rotating HMAC-signed shift QR sessions.
+                Default Geofence: {policyConfig.defaultGeofenceRadiusMeters}m · Max GPS Accuracy:{' '}
+                &le; {policyConfig.defaultGpsAccuracyThresholdMeters}m · Absent Cutoff: +
+                {policyConfig.shiftAbsentCutoffMinutes}m · Photo Required (In/Out):{' '}
+                {policyConfig.requireCheckInPhoto ? 'Yes' : 'Optional'} /{' '}
+                {policyConfig.requireCheckOutPhoto ? 'Yes' : 'Optional'}
               </p>
             </div>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => {
+                  setModalError(null);
+                  setPolRadius(policyConfig.defaultGeofenceRadiusMeters);
+                  setPolAccuracy(policyConfig.defaultGpsAccuracyThresholdMeters);
+                  setPolCutoff(policyConfig.shiftAbsentCutoffMinutes);
+                  setPolOtMin(policyConfig.overtimeMinimumMinutes);
+                  setPolPhotoIn(policyConfig.requireCheckInPhoto);
+                  setPolPhotoOut(policyConfig.requireCheckOutPhoto);
+                  setPolicyModalOpen(true);
+                }}
+                className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap self-start sm:self-auto"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Global Attendance Policy</span>
+              </button>
+            )}
           </div>
 
           {sites.length === 0 ? (
@@ -1277,25 +1807,37 @@ export const AttendanceManagementPage: React.FC = () => {
                                 type="button"
                                 onClick={() => {
                                   setQrLaunchSite(s);
-                                  setQrShiftSelector('Day Shift');
                                   setQrActiveModalOpen(true);
                                 }}
-                                className="min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
+                                className="min-h-[38px] inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] whitespace-nowrap"
                               >
                                 <QrCode className="w-3.5 h-3.5" />
                                 <span>Shift QR</span>
                               </button>
                             )}
-                            {canEditGpsSettings && (
+                            {canEditGpsSettings ? (
                               <button
                                 type="button"
                                 onClick={() => openGeoConfigModal(s)}
-                                className="min-h-[34px] inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
+                                className="min-h-[38px] inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] whitespace-nowrap"
                               >
                                 <Settings2 className="w-3.5 h-3.5 text-[#5C3D2E]" />
                                 <span>Configure</span>
                               </button>
-                            )}
+                            ) : user.role === 'hr' ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setModalError(null);
+                                  setOverrideReqSite(s);
+                                  setOverrideRadius(geo.allowedRadiusMeters + 100);
+                                  setOverrideReason('');
+                                }}
+                                className="min-h-[38px] inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] whitespace-nowrap"
+                              >
+                                <span>Request Radius Override</span>
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -1305,97 +1847,183 @@ export const AttendanceManagementPage: React.FC = () => {
               </table>
             </div>
           )}
+
+          {geoApprovals.length > 0 && (
+            <div className="pt-4 border-t border-[#E5DDD2] space-y-3">
+              <h3 className="font-display text-sm font-semibold text-[#1F1916]">
+                Site Geofence Radius Override Approval Requests
+              </h3>
+              <div className="divide-y divide-[#E5DDD2]">
+                {geoApprovals.map((app) => (
+                  <div
+                    key={app.approvalId}
+                    className="py-3 flex flex-wrap items-center justify-between gap-3 text-xs"
+                  >
+                    <div>
+                      <div className="font-semibold text-[#1F1916]">
+                        <span className="font-mono-tabular text-[#5C3D2E]">{app.approvalId}</span> ·{' '}
+                        {app.siteName} ({app.currentRadiusMeters}m &rarr;{' '}
+                        {app.requestedRadiusMeters}m)
+                      </div>
+                      <div className="text-[#574B43]">
+                        Requested by {app.requestedByName} · Reason: {app.reason}
+                      </div>
+                    </div>
+                    {app.status === 'Pending' && isAdmin ? (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleAdminDecideGeoApproval(app.approvalId, 'Rejected')}
+                          className="min-h-[36px] px-3 py-1 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] font-semibold text-[#B91C1C]"
+                        >
+                          Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleAdminDecideGeoApproval(app.approvalId, 'Approved')}
+                          className="min-h-[36px] px-3 py-1 rounded-lg bg-[#5C3D2E] font-semibold text-white"
+                        >
+                          Approve
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="font-semibold text-[#5C3D2E]">{app.status}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
-      {/* TAB 4: WEEKLY & MONTHLY ROLLUPS */}
-      {activeTab === 'rollups' && (
-        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
+      {/* TAB 5: 12 PHASE 4 ATTENDANCE REPORTS & BRANDED PDF EXPORT */}
+      {activeTab === 'reports' && (
+        <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1">
               <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-                Workforce Attendance Rollup ({fromDate} to {toDate})
+                REXON Phase 4 Operational Attendance Reports ({fromDate} to {toDate})
               </h2>
               <p className="text-xs text-[#574B43]">
-                Employee-wise totals of Present, Late, Half-Day, Absent, Weekly Off, Leave, Net
-                Hours, and Approved Overtime for Phase 5 payroll readiness.
+                Select any of the 12 official report types below and export as a branded REXON PDF
+                statement, CSV, or Excel workbook.
               </p>
             </div>
-            {canExport && rollups.length > 0 && (
-              <div className="flex items-center gap-2">
+
+            {canExport && (
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => exportRollups('csv')}
-                  className="min-h-[38px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] whitespace-nowrap"
+                  disabled={reportDataset.rows.length === 0}
+                  onClick={() => exportCurrentReport('pdf_print')}
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-45 whitespace-nowrap"
                 >
-                  <Download className="w-3.5 h-3.5 text-[#5C3D2E]" />
-                  <span>Rollup CSV</span>
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print / Save Branded PDF</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => exportRollups('excel')}
-                  className="min-h-[38px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white whitespace-nowrap"
+                  disabled={reportDataset.rows.length === 0}
+                  onClick={() => exportCurrentReport('pdf_download')}
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
                 >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Rollup Excel</span>
+                  <FileText className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                  <span>Download Statement</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={reportDataset.rows.length === 0}
+                  onClick={() => exportCurrentReport('csv')}
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                  <span>CSV</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={reportDataset.rows.length === 0}
+                  onClick={() => exportCurrentReport('excel')}
+                  className="min-h-[42px] inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#1F1916] hover:bg-[#F3EDE4] disabled:opacity-45 whitespace-nowrap"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-[#5C3D2E]" />
+                  <span>Excel</span>
                 </button>
               </div>
             )}
           </div>
 
-          {rollups.length === 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            {ATTENDANCE_REPORT_TYPES.map((repName) => {
+              const active = selectedReportType === repName;
+              return (
+                <button
+                  key={repName}
+                  type="button"
+                  onClick={() => setSelectedReportType(repName)}
+                  className={`min-h-[42px] px-3 py-2 rounded-lg border text-left text-xs font-semibold transition-colors truncate ${
+                    active
+                      ? 'bg-[#5C3D2E] border-[#5C3D2E] text-white'
+                      : 'bg-[#FAF8F5] border-[#E5DDD2] text-[#1F1916] hover:border-[#5C3D2E]'
+                  }`}
+                >
+                  {repName}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Summary Totals Strip */}
+          <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#E5DDD2] grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
+            {reportDataset.summaryMetrics.map((m) => (
+              <div key={m.label}>
+                <span className="text-[#7D6F65] block truncate">{m.label}</span>
+                <span className="mt-0.5 block font-mono-tabular text-base font-bold text-[#1F1916]">
+                  {m.value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {reportDataset.rows.length === 0 ? (
             <EmptyStatePanel
-              icon={CalendarCheck}
-              title="No Attendance Rollups for Selected Range"
-              description="Once daily attendance entries are recorded in the selected date window, employee summaries aggregate automatically."
+              icon={FileText}
+              title={`No Rows for ${selectedReportType}`}
+              description="Adjust the date range, branch, client, or site filter above to generate this report."
             />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-y border-[#E5DDD2] bg-[#FAF8F5] text-xs font-semibold text-[#574B43]">
-                    <th className="py-3 px-3">Employee</th>
-                    <th className="py-3 px-3">Primary Site</th>
-                    <th className="py-3 px-3 text-right">Present</th>
-                    <th className="py-3 px-3 text-right">Late</th>
-                    <th className="py-3 px-3 text-right">Half Day</th>
-                    <th className="py-3 px-3 text-right">Absent</th>
-                    <th className="py-3 px-3 text-right">W/Off &amp; Leave</th>
-                    <th className="py-3 px-3 text-right">Net Hours</th>
-                    <th className="py-3 px-3 text-right">Approved OT</th>
+                    {reportDataset.columns.map((col) => (
+                      <th
+                        key={col.header}
+                        className={`py-3 px-3 ${col.align === 'right' ? 'text-right' : 'text-left'}`}
+                      >
+                        {col.header}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E5DDD2] text-sm">
-                  {rollups.map((row) => (
-                    <tr key={row.employeeId} className="hover:bg-[#FAF8F5]">
-                      <td className="py-3 px-3">
-                        <div className="font-medium text-[#1F1916]">{row.employeeName}</div>
-                        <div className="text-xs text-[#574B43] font-mono-tabular">
-                          {row.employeeId} · {row.designationName}
-                        </div>
-                      </td>
-                      <td className="py-3 px-3 text-xs text-[#574B43]">{row.siteName}</td>
-                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#166534]">
-                        {row.presentDays}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular text-[#B45309]">
-                        {row.lateDays}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular text-[#574B43]">
-                        {row.halfDays}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular text-[#B91C1C]">
-                        {row.absentDays}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular text-[#574B43]">
-                        {row.weeklyOffDays + row.holidayDays + row.leaveDays}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular font-semibold text-[#1F1916]">
-                        {row.totalNetHours}h
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono-tabular text-[#5C3D2E]">
-                        {row.approvedOvertimeHours}h
-                      </td>
+                <tbody className="divide-y divide-[#E5DDD2] text-xs">
+                  {reportDataset.rows.slice(0, 60).map((row, idx) => (
+                    <tr key={idx} className="hover:bg-[#FAF8F5]">
+                      {row.map((cell, cIdx) => {
+                        const col = reportDataset.columns[cIdx];
+                        return (
+                          <td
+                            key={cIdx}
+                            className={`py-2.5 px-3 text-[#1F1916] ${
+                              col?.align === 'right'
+                                ? 'text-right font-mono-tabular'
+                                : 'text-left'
+                            }`}
+                          >
+                            {cell}
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -1405,16 +2033,16 @@ export const AttendanceManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* TAB 5: AUDIT TRAIL */}
+      {/* TAB 6: AUDIT TRAIL */}
       {activeTab === 'audit' && (
         <section className="bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 space-y-4">
           <div>
             <h2 className="font-display text-lg font-semibold text-[#1F1916]">
-              Immutable Attendance &amp; Roster Audit Log
+              Immutable Attendance, Shift &amp; Roster Audit History
             </h2>
             <p className="text-xs text-[#574B43]">
-              Every roster publish/modification, GPS geofence update, QR session issuance, manual
-              override, and overtime decision is permanently recorded.
+              Every shift master update, roster publish/copy, GPS/photo check-in, HR time
+              correction, Field Officer report, and overtime decision is permanently logged.
             </p>
           </div>
 
@@ -1432,12 +2060,12 @@ export const AttendanceManagementPage: React.FC = () => {
                     <th className="py-3 px-3">Timestamp</th>
                     <th className="py-3 px-3">Category &amp; Action</th>
                     <th className="py-3 px-3">Target</th>
-                    <th className="py-3 px-3">Change Summary &amp; Reason</th>
+                    <th className="py-3 px-3">Before / After Summary &amp; Reason</th>
                     <th className="py-3 px-3">Actor</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E5DDD2] text-sm">
-                  {auditLogs.slice(0, 50).map((log) => (
+                  {auditLogs.slice(0, 80).map((log) => (
                     <tr key={log.auditId} className="hover:bg-[#FAF8F5]">
                       <td className="py-3 px-3 font-mono-tabular text-xs text-[#574B43] whitespace-nowrap">
                         {new Date(log.timestamp).toLocaleString()}
@@ -1450,7 +2078,10 @@ export const AttendanceManagementPage: React.FC = () => {
                         {log.targetId}
                       </td>
                       <td className="py-3 px-3 text-xs text-[#574B43]">
-                        <div>{log.newValueSummary}</div>
+                        {log.previousValueSummary && (
+                          <div className="text-[#7D6F65]">Before: {log.previousValueSummary}</div>
+                        )}
+                        <div className="text-[#1F1916]">{log.newValueSummary}</div>
                         {log.reason && (
                           <div className="text-[#4A3023] mt-0.5">Reason: {log.reason}</div>
                         )}
@@ -1481,13 +2112,14 @@ export const AttendanceManagementPage: React.FC = () => {
                   Record Manual HR Attendance Entry
                 </h3>
                 <p className="text-xs text-[#574B43]">
-                  Record Present, Weekly Off, Holiday, Leave, or Absent entries with audit remarks.
+                  Record Present, Weekly Off, Holiday, Leave, or Absent entries with mandatory audit
+                  remarks.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setManualOpen(false)}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-[#7D6F65]"
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-[#7D6F65]"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1508,7 +2140,7 @@ export const AttendanceManagementPage: React.FC = () => {
                   <select
                     value={manEmployeeId}
                     onChange={(e) => setManEmployeeId(e.target.value)}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     required
                   >
                     <option value="">Select Employee</option>
@@ -1525,7 +2157,7 @@ export const AttendanceManagementPage: React.FC = () => {
                   <select
                     value={manSiteId}
                     onChange={(e) => setManSiteId(e.target.value)}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     required
                   >
                     <option value="">Select Site</option>
@@ -1545,7 +2177,7 @@ export const AttendanceManagementPage: React.FC = () => {
                     type="date"
                     value={manDate}
                     onChange={(e) => setManDate(e.target.value)}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     required
                   />
                 </div>
@@ -1554,7 +2186,7 @@ export const AttendanceManagementPage: React.FC = () => {
                   <select
                     value={manShift}
                     onChange={(e) => setManShift(e.target.value)}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   >
                     {ROSTER_SHIFT_TYPES.map((st) => (
                       <option key={st} value={st}>
@@ -1568,7 +2200,7 @@ export const AttendanceManagementPage: React.FC = () => {
                   <select
                     value={manStatus}
                     onChange={(e) => setManStatus(e.target.value as AttendanceStatus)}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   >
                     {ATTENDANCE_STATUSES.map((st) => (
                       <option key={st} value={st}>
@@ -1579,7 +2211,10 @@ export const AttendanceManagementPage: React.FC = () => {
                 </div>
               </div>
 
-              {(manStatus === 'Present' || manStatus === 'Late' || manStatus === 'Half Day') && (
+              {(manStatus === 'Present' ||
+                manStatus === 'Late' ||
+                manStatus === 'Half Day' ||
+                manStatus === 'On Duty') && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-[#1F1916] mb-1">
@@ -1589,7 +2224,7 @@ export const AttendanceManagementPage: React.FC = () => {
                       type="time"
                       value={manSchedStart}
                       onChange={(e) => setManSchedStart(e.target.value)}
-                      className="w-full min-h-[40px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                      className="w-full min-h-[42px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     />
                   </div>
                   <div>
@@ -1600,7 +2235,7 @@ export const AttendanceManagementPage: React.FC = () => {
                       type="time"
                       value={manSchedEnd}
                       onChange={(e) => setManSchedEnd(e.target.value)}
-                      className="w-full min-h-[40px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                      className="w-full min-h-[42px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     />
                   </div>
                   <div>
@@ -1611,7 +2246,7 @@ export const AttendanceManagementPage: React.FC = () => {
                       type="time"
                       value={manInTime}
                       onChange={(e) => setManInTime(e.target.value)}
-                      className="w-full min-h-[40px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                      className="w-full min-h-[42px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     />
                   </div>
                   <div>
@@ -1622,7 +2257,7 @@ export const AttendanceManagementPage: React.FC = () => {
                       type="time"
                       value={manOutTime}
                       onChange={(e) => setManOutTime(e.target.value)}
-                      className="w-full min-h-[40px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                      className="w-full min-h-[42px] px-2.5 py-1.5 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                     />
                   </div>
                 </div>
@@ -1657,14 +2292,14 @@ export const AttendanceManagementPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setManualOpen(false)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-50"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-50"
                 >
                   {submitting ? 'Saving...' : 'Save Attendance'}
                 </button>
@@ -1674,21 +2309,146 @@ export const AttendanceManagementPage: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 2: HR VERIFY / STATUS UPDATE */}
+      {/* MODAL 2: ENHANCED HR VERIFY, PHOTO/GPS INSPECTION & TIME CORRECTION */}
       {verifyingRecord && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4 overflow-y-auto"
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-md bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
-            <h3 className="font-display text-lg font-bold text-[#1F1916]">
-              Verify Attendance — {verifyingRecord.attendanceId}
-            </h3>
-            <p className="mt-1 text-xs text-[#574B43]">
-              {verifyingRecord.employeeName} · {verifyingRecord.attendanceDate} ·{' '}
-              {verifyingRecord.siteName}
-            </p>
+          <div className="w-full max-w-2xl bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 my-8">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-[#E5DDD2]">
+              <div>
+                <h3 className="font-display text-lg font-bold text-[#1F1916]">
+                  HR Attendance Verification — {verifyingRecord.attendanceId}
+                </h3>
+                <p className="mt-0.5 text-xs text-[#574B43]">
+                  {verifyingRecord.employeeName} ({verifyingRecord.employeeId}) ·{' '}
+                  {verifyingRecord.attendanceDate} · {verifyingRecord.siteName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVerifyingRecord(null)}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-[#7D6F65]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* GPS & Photo Evidence Panel */}
+            <div className="mt-4 p-4 rounded-xl bg-[#FAF8F5] border border-[#E5DDD2] space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <span className="font-semibold text-[#1F1916] block">
+                    GPS Location Verification
+                  </span>
+                  <span className="text-[#574B43] block mt-0.5">
+                    Status: <strong>{deriveAttendanceLocationStatus(verifyingRecord)}</strong>
+                  </span>
+                  {verifyingRecord.checkInGeo && (
+                    <span className="font-mono-tabular text-[11px] text-[#574B43] block">
+                      In: {verifyingRecord.checkInGeo.latitude ?? '—'},{' '}
+                      {verifyingRecord.checkInGeo.longitude ?? '—'} (
+                      {verifyingRecord.checkInGeo.distanceMeters ?? '—'}m /{' '}
+                      {verifyingRecord.checkInGeo.allowedRadiusMeters}m)
+                    </span>
+                  )}
+                  {verifyingRecord.checkOutGeo && (
+                    <span className="font-mono-tabular text-[11px] text-[#574B43] block">
+                      Out: {verifyingRecord.checkOutGeo.latitude ?? '—'},{' '}
+                      {verifyingRecord.checkOutGeo.longitude ?? '—'} (
+                      {verifyingRecord.checkOutGeo.distanceMeters ?? '—'}m)
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <span className="font-semibold text-[#1F1916] block">
+                    Recorded Punches &amp; Hours
+                  </span>
+                  <span className="font-mono-tabular text-[#574B43] block mt-0.5">
+                    Scheduled: {verifyingRecord.scheduledStartTime}–
+                    {verifyingRecord.scheduledEndTime} ({verifyingRecord.shiftType})
+                  </span>
+                  <span className="font-mono-tabular text-[#1F1916] block">
+                    Actual: In {formatTimeShort(verifyingRecord.checkInAt)} · Out{' '}
+                    {formatTimeShort(verifyingRecord.checkOutAt)} ({verifyingRecord.totalDutyHours}
+                    h)
+                  </span>
+                </div>
+              </div>
+
+              {(verifyingRecord.checkInPhoto?.previewUrl ||
+                verifyingRecord.checkOutPhoto?.previewUrl) && (
+                <div className="pt-3 border-t border-[#E5DDD2] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[#1F1916]">
+                      Captured Attendance Verification Photos
+                    </span>
+                    <span className="text-[11px] text-[#7D6F65]">
+                      Visual HR check only — zero automated biometric recognition
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {verifyingRecord.checkInPhoto?.previewUrl && (
+                      <div className="flex items-center gap-3 p-2 rounded-lg bg-white border border-[#E5DDD2]">
+                        <img
+                          src={verifyingRecord.checkInPhoto.previewUrl}
+                          alt="Check-in verification"
+                          referrerPolicy="no-referrer"
+                          className="w-16 h-16 rounded-lg object-cover border border-[#D4C7B8]"
+                        />
+                        <div className="text-[11px]">
+                          <div className="font-semibold text-[#1F1916]">Check-In Photo</div>
+                          <div className="text-[#574B43]">
+                            Camera: {verifyingRecord.checkInPhoto.cameraFacing}
+                          </div>
+                          <div className="font-mono-tabular text-[#7D6F65]">
+                            {formatTimeShort(verifyingRecord.checkInPhoto.captureTime)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {verifyingRecord.checkOutPhoto?.previewUrl && (
+                      <div className="flex items-center gap-3 p-2 rounded-lg bg-white border border-[#E5DDD2]">
+                        <img
+                          src={verifyingRecord.checkOutPhoto.previewUrl}
+                          alt="Check-out verification"
+                          referrerPolicy="no-referrer"
+                          className="w-16 h-16 rounded-lg object-cover border border-[#D4C7B8]"
+                        />
+                        <div className="text-[11px]">
+                          <div className="font-semibold text-[#1F1916]">Check-Out Photo</div>
+                          <div className="text-[#574B43]">
+                            Camera: {verifyingRecord.checkOutPhoto.cameraFacing}
+                          </div>
+                          <div className="font-mono-tabular text-[#7D6F65]">
+                            {formatTimeShort(verifyingRecord.checkOutPhoto.captureTime)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {(verifyingRecord.timeCorrectionHistory?.length ?? 0) > 0 && (
+                <div className="pt-3 border-t border-[#E5DDD2] space-y-1">
+                  <span className="font-semibold text-[#5C3D2E] block">
+                    Preserved Time Correction History
+                  </span>
+                  {verifyingRecord.timeCorrectionHistory?.map((h, i) => (
+                    <div key={i} className="text-[11px] text-[#574B43] font-mono-tabular">
+                      {h.correctedByName}: In {formatTimeShort(h.previousCheckInAt)}&rarr;
+                      {formatTimeShort(h.newCheckInAt)} · Out{' '}
+                      {formatTimeShort(h.previousCheckOutAt)}&rarr;
+                      {formatTimeShort(h.newCheckOutAt)} ({h.reason})
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {modalError && (
               <div className="mt-3 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
@@ -1697,61 +2457,144 @@ export const AttendanceManagementPage: React.FC = () => {
             )}
 
             <form onSubmit={(e) => void handleVerifySubmit(e)} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-[#1F1916] mb-1">
-                  Attendance Status
-                </label>
-                <select
-                  value={verStatus}
-                  onChange={(e) => setVerStatus(e.target.value as AttendanceStatus)}
-                  className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
-                >
-                  {ATTENDANCE_STATUSES.map((st) => (
-                    <option key={st} value={st}>
-                      {st}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    HR Verification Decision
+                  </label>
+                  <select
+                    value={verDecision}
+                    onChange={(e) =>
+                      setVerDecision(e.target.value as AttendanceVerificationStatus)
+                    }
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  >
+                    <option value="Verified">Verified (Payroll Eligible)</option>
+                    <option value="Exception Approved">
+                      Exception Approved (Payroll Eligible)
                     </option>
-                  ))}
-                </select>
+                    <option value="Rejected">Rejected (Excluded from Payroll)</option>
+                    <option value="Pending">Keep Pending Review</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Attendance Status
+                  </label>
+                  <select
+                    value={verDecision === 'Rejected' ? 'Rejected' : verStatus}
+                    disabled={verDecision === 'Rejected'}
+                    onChange={(e) => setVerStatus(e.target.value as AttendanceStatus)}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg disabled:opacity-60"
+                  >
+                    {ATTENDANCE_STATUSES.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
+
+              <label className="flex items-center gap-2 text-xs font-semibold text-[#5C3D2E]">
+                <input
+                  type="checkbox"
+                  checked={verCorrectTimes}
+                  onChange={(e) => setVerCorrectTimes(e.target.checked)}
+                  className="w-4 h-4 accent-[#5C3D2E]"
+                />
+                <span>
+                  Correct Check-In / Check-Out Timestamps (Preserves original punch in audit
+                  history)
+                </span>
+              </label>
+
+              {verCorrectTimes && (
+                <div className="p-3.5 rounded-xl bg-[#FAF8F5] border border-[#D4C7B8] space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                        Corrected Check-In
+                      </label>
+                      <input
+                        type="time"
+                        value={verCheckIn24h}
+                        onChange={(e) => setVerCheckIn24h(e.target.value)}
+                        className="w-full min-h-[42px] px-3 py-1.5 text-xs font-mono-tabular bg-white border border-[#E5DDD2] rounded-lg"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                        Corrected Check-Out
+                      </label>
+                      <input
+                        type="time"
+                        value={verCheckOut24h}
+                        onChange={(e) => setVerCheckOut24h(e.target.value)}
+                        className="w-full min-h-[42px] px-3 py-1.5 text-xs font-mono-tabular bg-white border border-[#E5DDD2] rounded-lg"
+                      />
+                    </div>
+                    <div className="flex items-end pb-2">
+                      <label className="flex items-center gap-2 text-xs text-[#574B43]">
+                        <input
+                          type="checkbox"
+                          checked={verCheckOutNextDay}
+                          onChange={(e) => setVerCheckOutNextDay(e.target.checked)}
+                          className="w-4 h-4 accent-[#5C3D2E]"
+                        />
+                        <span>Next Day (+1d)</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                      Mandatory Time Correction Reason
+                    </label>
+                    <input
+                      type="text"
+                      value={verCorrectionReason}
+                      onChange={(e) => setVerCorrectionReason(e.target.value)}
+                      placeholder="e.g. Gate register verified with Field Officer at 20:05"
+                      maxLength={240}
+                      className="w-full min-h-[42px] px-3 py-1.5 text-xs bg-white border border-[#E5DDD2] rounded-lg"
+                      required
+                    />
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-[#1F1916] mb-1">
-                  HR Verification Remarks
+                  HR Verification Remarks{' '}
+                  {(verDecision === 'Rejected' || verDecision === 'Exception Approved') &&
+                    '(Mandatory)'}
                 </label>
                 <textarea
                   rows={2}
                   value={verRemarks}
                   onChange={(e) => setVerRemarks(e.target.value)}
-                  placeholder="Optional verification notes..."
+                  placeholder="Enter HR verification or exception approval justification..."
                   maxLength={300}
                   className="w-full px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required={verDecision === 'Rejected' || verDecision === 'Exception Approved'}
                 />
               </div>
-
-              <label className="flex items-center gap-2 text-xs font-medium text-[#1F1916]">
-                <input
-                  type="checkbox"
-                  checked={verMarkVerified}
-                  onChange={(e) => setVerMarkVerified(e.target.checked)}
-                  className="w-4 h-4 accent-[#5C3D2E]"
-                />
-                <span>Lock as HR-Verified (prevents employee self-modification)</span>
-              </label>
 
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setVerifyingRecord(null)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] disabled:opacity-50"
                 >
-                  {submitting ? 'Saving...' : 'Confirm Verification'}
+                  {submitting ? 'Saving...' : 'Save HR Decision'}
                 </button>
               </div>
             </form>
@@ -1771,7 +2614,8 @@ export const AttendanceManagementPage: React.FC = () => {
               Overtime Review — {otRecord.employeeName}
             </h3>
             <p className="mt-1 text-xs text-[#574B43] font-mono-tabular">
-              Recorded Extra Duty: {otRecord.overtimeMinutes} mins ({otRecord.attendanceDate})
+              Regular Duty: {otRecord.totalDutyHours}h · Extra Duty: {otRecord.overtimeMinutes} mins
+              ({otRecord.attendanceDate})
             </p>
 
             {modalError && (
@@ -1786,7 +2630,7 @@ export const AttendanceManagementPage: React.FC = () => {
                 <select
                   value={otDecision}
                   onChange={(e) => setOtDecision(e.target.value as 'Approved' | 'Rejected')}
-                  className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                 >
                   <option value="Approved">Approve Overtime</option>
                   <option value="Rejected">Reject Overtime</option>
@@ -1804,7 +2648,7 @@ export const AttendanceManagementPage: React.FC = () => {
                     max={480}
                     value={otApprovedMins}
                     onChange={(e) => setOtApprovedMins(Number(e.target.value))}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   />
                 </div>
               )}
@@ -1825,14 +2669,14 @@ export const AttendanceManagementPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setOtRecord(null)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
                 >
                   {submitting ? 'Saving...' : 'Submit Decision'}
                 </button>
@@ -1842,7 +2686,7 @@ export const AttendanceManagementPage: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 4: FIELD OFFICER REMARK */}
+      {/* MODAL 4: FIELD OFFICER QUICK REMARK */}
       {foRecord && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4"
@@ -1882,14 +2726,14 @@ export const AttendanceManagementPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setFoRecord(null)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
                 >
                   Save Remark
                 </button>
@@ -1933,7 +2777,7 @@ export const AttendanceManagementPage: React.FC = () => {
                 <select
                   value={corrDecision}
                   onChange={(e) => setCorrDecision(e.target.value as 'Approved' | 'Rejected')}
-                  className="w-full min-h-[42px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                 >
                   <option value="Approved">Approve &amp; Update Attendance</option>
                   <option value="Rejected">Reject Request</option>
@@ -1957,14 +2801,14 @@ export const AttendanceManagementPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setReviewingCorrection(null)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
                 >
                   {submitting ? 'Saving...' : 'Submit Review'}
                 </button>
@@ -1994,7 +2838,7 @@ export const AttendanceManagementPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setConfiguringSite(null)}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-[#7D6F65]"
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-[#7D6F65]"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2011,7 +2855,7 @@ export const AttendanceManagementPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleCaptureBrowserGpsForSite}
-                  className="min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F3EDE4] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#E5DDD2] whitespace-nowrap"
+                  className="min-h-[38px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F3EDE4] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#E5DDD2] whitespace-nowrap"
                 >
                   <Navigation className="w-3.5 h-3.5" />
                   <span>Use My Current GPS Location</span>
@@ -2028,8 +2872,8 @@ export const AttendanceManagementPage: React.FC = () => {
                     step="any"
                     value={geoLat}
                     onChange={(e) => setGeoLat(e.target.value)}
-                    placeholder="e.g. 18.7606"
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    placeholder="e.g. 28.6139"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   />
                 </div>
                 <div>
@@ -2041,8 +2885,8 @@ export const AttendanceManagementPage: React.FC = () => {
                     step="any"
                     value={geoLng}
                     onChange={(e) => setGeoLng(e.target.value)}
-                    placeholder="e.g. 73.8636"
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    placeholder="e.g. 77.2090"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   />
                 </div>
               </div>
@@ -2058,12 +2902,12 @@ export const AttendanceManagementPage: React.FC = () => {
                     max={5000}
                     value={geoRadius}
                     onChange={(e) => setGeoRadius(Number(e.target.value))}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-[#1F1916] mb-1">
-                    Max GPS Accuracy Threshold (Meters)
+                    Max GPS Accuracy (Meters)
                   </label>
                   <input
                     type="number"
@@ -2071,12 +2915,12 @@ export const AttendanceManagementPage: React.FC = () => {
                     max={1000}
                     value={geoAccThreshold}
                     onChange={(e) => setGeoAccThreshold(Number(e.target.value))}
-                    className="w-full min-h-[42px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
                   />
                 </div>
               </div>
 
-              <div className="space-y-2 pt-1">
+              <div className="space-y-2">
                 <label className="flex items-center gap-2 text-xs font-medium text-[#1F1916]">
                   <input
                     type="checkbox"
@@ -2084,7 +2928,7 @@ export const AttendanceManagementPage: React.FC = () => {
                     onChange={(e) => setGeoMandatory(e.target.checked)}
                     className="w-4 h-4 accent-[#5C3D2E]"
                   />
-                  <span>Enforce GPS Geofence Radius on GPS Check-In / Check-Out</span>
+                  <span>Enforce geofence boundary (flag outside-radius punches as Exception)</span>
                 </label>
                 <label className="flex items-center gap-2 text-xs font-medium text-[#1F1916]">
                   <input
@@ -2093,24 +2937,24 @@ export const AttendanceManagementPage: React.FC = () => {
                     onChange={(e) => setGeoQrEnabled(e.target.checked)}
                     className="w-4 h-4 accent-[#5C3D2E]"
                   />
-                  <span>Enable Rotating Time-Limited Shift QR Attendance for this Site</span>
+                  <span>Enable rotating HMAC-signed Shift QR attendance on this site</span>
                 </label>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setConfiguringSite(null)}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="min-h-[40px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
                 >
-                  {submitting ? 'Saving...' : 'Save Site Settings'}
+                  {submitting ? 'Saving...' : 'Save Geofence Settings'}
                 </button>
               </div>
             </form>
@@ -2118,40 +2962,486 @@ export const AttendanceManagementPage: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 7: SHIFT SELECTOR + ROTATING QR */}
-      {qrLaunchSite && qrActiveModalOpen && (
-        <div className="space-y-2">
-          <div className="fixed top-4 right-4 z-[60] bg-white border border-[#D4C7B8] rounded-lg px-3 py-2 shadow-sm flex items-center gap-2 text-xs">
-            <span className="font-semibold text-[#1F1916]">Shift:</span>
-            <select
-              value={qrShiftSelector}
-              onChange={(e) => setQrShiftSelector(e.target.value)}
-              className="px-2 py-1 bg-[#FAF8F5] border border-[#E5DDD2] rounded font-medium"
-            >
-              {ROSTER_SHIFT_TYPES.map((st) => (
-                <option key={st} value={st}>
-                  {st}
-                </option>
-              ))}
-            </select>
+      {/* MODAL 7: HR REQUEST GEOFENCE OVERRIDE */}
+      {overrideReqSite && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
+            <h3 className="font-display text-lg font-bold text-[#1F1916]">
+              Request Site Radius Override — {overrideReqSite.siteName}
+            </h3>
+            <p className="mt-1 text-xs text-[#574B43]">
+              Submit a site geofence radius adjustment for Administrator sign-off.
+            </p>
+            {modalError && (
+              <div className="mt-3 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
+                {modalError}
+              </div>
+            )}
+            <form onSubmit={(e) => void handleRequestRadiusOverride(e)} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                  Requested Radius (Meters)
+                </label>
+                <input
+                  type="number"
+                  min={20}
+                  max={5000}
+                  value={overrideRadius}
+                  onChange={(e) => setOverrideRadius(Number(e.target.value))}
+                  className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                  Operational Reason
+                </label>
+                <textarea
+                  rows={3}
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="e.g. Large warehouse perimeter requires 350m check-in radius..."
+                  maxLength={280}
+                  className="w-full px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOverrideReqSite(null)}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white"
+                >
+                  {submitting ? 'Submitting...' : 'Submit to Admin'}
+                </button>
+              </div>
+            </form>
           </div>
-          <RotatingShiftQrModal
-            open={qrActiveModalOpen}
-            onClose={() => {
-              setQrActiveModalOpen(false);
-              setQrLaunchSite(null);
-            }}
-            caller={user}
-            isPreviewSession={isPreviewSession}
-            siteId={qrLaunchSite.siteId}
-            siteName={qrLaunchSite.siteName}
-            attendanceDate={today}
-            shiftType={qrShiftSelector}
-            scheduledStartTime={qrShiftSelector === 'Night Shift' ? '20:00' : '08:00'}
-            scheduledEndTime={qrShiftSelector === 'Night Shift' ? '08:00' : '20:00'}
-          />
         </div>
       )}
+
+      {/* MODAL 8: ADMIN GLOBAL ATTENDANCE POLICY */}
+      {policyModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-lg bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-[#E5DDD2]">
+              <div>
+                <h3 className="font-display text-lg font-bold text-[#1F1916]">
+                  Global Attendance &amp; Geofence Policy Defaults
+                </h3>
+                <p className="text-xs text-[#574B43]">
+                  Applies default radius, GPS accuracy, shift cutoff, and photo rules system-wide.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPolicyModalOpen(false)}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-[#7D6F65]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {modalError && (
+              <div className="mt-3 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
+                {modalError}
+              </div>
+            )}
+            <form onSubmit={(e) => void handleSaveGlobalPolicy(e)} className="mt-4 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Default Geofence Radius (m)
+                  </label>
+                  <input
+                    type="number"
+                    min={20}
+                    max={5000}
+                    value={polRadius}
+                    onChange={(e) => setPolRadius(Number(e.target.value))}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Max GPS Accuracy (m)
+                  </label>
+                  <input
+                    type="number"
+                    min={10}
+                    max={1000}
+                    value={polAccuracy}
+                    onChange={(e) => setPolAccuracy(Number(e.target.value))}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Shift Absent Cutoff (mins)
+                  </label>
+                  <input
+                    type="number"
+                    min={15}
+                    max={720}
+                    value={polCutoff}
+                    onChange={(e) => setPolCutoff(Number(e.target.value))}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Minimum Overtime (mins)
+                  </label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={240}
+                    value={polOtMin}
+                    onChange={(e) => setPolOtMin(Number(e.target.value))}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs font-medium text-[#1F1916]">
+                  <input
+                    type="checkbox"
+                    checked={polPhotoIn}
+                    onChange={(e) => setPolPhotoIn(e.target.checked)}
+                    className="w-4 h-4 accent-[#5C3D2E]"
+                  />
+                  <span>Require live camera photo on Employee Check-In</span>
+                </label>
+                <label className="flex items-center gap-2 text-xs font-medium text-[#1F1916]">
+                  <input
+                    type="checkbox"
+                    checked={polPhotoOut}
+                    onChange={(e) => setPolPhotoOut(e.target.checked)}
+                    className="w-4 h-4 accent-[#5C3D2E]"
+                  />
+                  <span>Require live camera photo on Employee Check-Out</span>
+                </label>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPolicyModalOpen(false)}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white"
+                >
+                  Save Global Policy
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 9: SUBMIT FIELD OFFICER REPORT */}
+      {foReportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4 overflow-y-auto"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-lg bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 my-8">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-[#E5DDD2]">
+              <div>
+                <h3 className="font-display text-lg font-bold text-[#1F1916]">
+                  Submit Field Attendance / Site Visit Report
+                </h3>
+                <p className="text-xs text-[#574B43]">
+                  Report Missing Attendance, Site Visits, or Employee Replacement Requirements.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFoReportModalOpen(false)}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-[#7D6F65]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {modalError && (
+              <div className="mt-3 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
+                {modalError}
+              </div>
+            )}
+            <form onSubmit={(e) => void handleCreateFoReport(e)} className="mt-4 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">Site</label>
+                  <select
+                    value={foRepSiteId}
+                    onChange={(e) => setFoRepSiteId(e.target.value)}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    required
+                  >
+                    <option value="">Select Site</option>
+                    {sites.map((s) => (
+                      <option key={s.siteId} value={s.siteId}>
+                        {s.siteName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Report Type
+                  </label>
+                  <select
+                    value={foRepType}
+                    onChange={(e) => setFoRepType(e.target.value as FieldOfficerExceptionType)}
+                    className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  >
+                    {FIELD_OFFICER_EXCEPTION_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">Date</label>
+                  <input
+                    type="date"
+                    value={foRepDate}
+                    onChange={(e) => setFoRepDate(e.target.value)}
+                    className="w-full min-h-[44px] px-3 py-2 text-xs font-mono-tabular bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">Shift</label>
+                  <select
+                    value={foRepShift}
+                    onChange={(e) => setFoRepShift(e.target.value)}
+                    className="w-full min-h-[44px] px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  >
+                    <option value="All Shifts">All Shifts</option>
+                    {ROSTER_SHIFT_TYPES.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                    Employee (Optional)
+                  </label>
+                  <select
+                    value={foRepEmpId}
+                    onChange={(e) => setFoRepEmpId(e.target.value)}
+                    className="w-full min-h-[44px] px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  >
+                    <option value="">Site-wide</option>
+                    {employees.map((emp) => (
+                      <option key={emp.employeeId} value={emp.employeeId}>
+                        {emp.fullName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">Summary</label>
+                <input
+                  type="text"
+                  value={foRepSummary}
+                  onChange={(e) => setFoRepSummary(e.target.value)}
+                  placeholder="Short headline for HR queue..."
+                  maxLength={150}
+                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                  Detailed Field Remarks
+                </label>
+                <textarea
+                  rows={3}
+                  value={foRepRemarks}
+                  onChange={(e) => setFoRepRemarks(e.target.value)}
+                  placeholder="Detailed observations, post status, or replacement need..."
+                  maxLength={380}
+                  className="w-full px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required
+                />
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#FAF8F5] border border-[#E5DDD2] flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {foRepPhoto && (
+                    <img
+                      src={foRepPhoto.previewDataUrl}
+                      alt="Captured field photo"
+                      referrerPolicy="no-referrer"
+                      className="w-11 h-11 rounded-lg object-cover border border-[#D4C7B8]"
+                    />
+                  )}
+                  <span className="text-xs text-[#574B43]">
+                    {foRepPhoto ? 'Site photo attached' : 'Attach supporting site photo (optional)'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFoCameraOpen(true)}
+                  className="min-h-[38px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E]"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>{foRepPhoto ? 'Retake' : 'Camera'}</span>
+                </button>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFoReportModalOpen(false)}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Report'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 10: HR REVIEW FIELD OFFICER REPORT */}
+      {reviewingFoReport && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1F1916]/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6">
+            <h3 className="font-display text-lg font-bold text-[#1F1916]">
+              Resolve Field Report — {reviewingFoReport.exceptionId}
+            </h3>
+            <p className="mt-1 text-xs text-[#574B43]">
+              {reviewingFoReport.reportType} · {reviewingFoReport.siteName} (
+              {reviewingFoReport.attendanceDate})
+            </p>
+            <p className="mt-2 p-2.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs text-[#1F1916]">
+              {reviewingFoReport.summary}: {reviewingFoReport.remarks}
+            </p>
+            {modalError && (
+              <div className="mt-3 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#B91C1C]">
+                {modalError}
+              </div>
+            )}
+            <form onSubmit={(e) => void handleReviewFoReport(e)} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">Decision</label>
+                <select
+                  value={foReviewDecision}
+                  onChange={(e) => setFoReviewDecision(e.target.value as 'Resolved' | 'Rejected')}
+                  className="w-full min-h-[44px] px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                >
+                  <option value="Resolved">Mark Resolved</option>
+                  <option value="Rejected">Reject Report</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[#1F1916] mb-1">
+                  HR Resolution Notes (Mandatory)
+                </label>
+                <textarea
+                  rows={3}
+                  value={foReviewNotes}
+                  onChange={(e) => setFoReviewNotes(e.target.value)}
+                  placeholder="Enter HR action taken (e.g. reliever deployed, attendance corrected)..."
+                  maxLength={280}
+                  className="w-full px-3 py-2 text-sm bg-[#FAF8F5] border border-[#E5DDD2] rounded-lg"
+                  required
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReviewingFoReport(null)}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white"
+                >
+                  Save Resolution
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ROTATING SHIFT QR MODAL */}
+      {qrLaunchSite && (
+        <RotatingShiftQrModal
+          open={qrActiveModalOpen}
+          caller={user}
+          isPreviewSession={isPreviewSession}
+          siteId={qrLaunchSite.siteId}
+          siteName={qrLaunchSite.siteName}
+          attendanceDate={today}
+          shiftType={qrShiftSelector}
+          scheduledStartTime="08:00"
+          scheduledEndTime="20:00"
+          onClose={() => {
+            setQrActiveModalOpen(false);
+            setQrLaunchSite(null);
+          }}
+        />
+      )}
+
+      {/* CAMERA CAPTURE FOR FO REPORTS */}
+      <CameraCaptureModal
+        isOpen={foCameraOpen}
+        title="Capture Field Verification Photo"
+        subtitle="Capture site turnout, post inspection, or attendance verification evidence."
+        defaultFacing="environment"
+        onClose={() => setFoCameraOpen(false)}
+        onCapture={(cap) => {
+          setFoRepPhoto(cap);
+          setFoCameraOpen(false);
+        }}
+      />
     </div>
   );
 };

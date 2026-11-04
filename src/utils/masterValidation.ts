@@ -5,6 +5,8 @@ import {
   ClientRecord,
   DesignationFormInput,
   DesignationRecord,
+  FieldOfficerFormInput,
+  FieldOfficerRecord,
   HRProfileFormInput,
   HRProfileRecord,
   SERVICE_CATEGORIES,
@@ -116,8 +118,21 @@ export function validateHRProfileForm(
   const nameCheck = validateRequiredText(input.fullName, 'Full Name', 2, 120);
   if (!nameCheck.valid) return nameCheck;
 
-  const emailCheck = validateEmail(input.email);
-  if (!emailCheck.valid) return emailCheck;
+  const trimmedEmail = input.email.trim();
+  if (trimmedEmail.length > 0) {
+    const emailCheck = validateEmail(trimmedEmail);
+    if (!emailCheck.valid) return emailCheck;
+
+    const dupEmail = existingHR.find(
+      (h) => h.hrId !== editingHrId && h.email.trim().toLowerCase() === trimmedEmail.toLowerCase()
+    );
+    if (dupEmail) {
+      return {
+        valid: false,
+        error: `Email "${trimmedEmail}" is already registered to HR account ${dupEmail.hrId} (${dupEmail.fullName}).`,
+      };
+    }
+  }
 
   const mobileCheck = validatePhone(input.mobile);
   if (!mobileCheck.valid) return mobileCheck;
@@ -128,16 +143,6 @@ export function validateHRProfileForm(
 
   if (!input.joiningDate) {
     return { valid: false, error: 'Joining Date is required.' };
-  }
-
-  const dupEmail = existingHR.find(
-    (h) => h.hrId !== editingHrId && h.email.trim().toLowerCase() === input.email.trim().toLowerCase()
-  );
-  if (dupEmail) {
-    return {
-      valid: false,
-      error: `Email "${input.email.trim()}" is already registered to HR account ${dupEmail.hrId} (${dupEmail.fullName}).`,
-    };
   }
 
   const normalizedPhone = input.mobile.replace(/\D/g, '');
@@ -311,8 +316,10 @@ export function validateSiteForm(
   const mgrMobCheck = validatePhone(input.managerMobile);
   if (!mgrMobCheck.valid) return { valid: false, error: `Manager Mobile: ${mgrMobCheck.error}` };
 
-  const mgrEmailCheck = validateEmail(input.managerEmail);
-  if (!mgrEmailCheck.valid) return { valid: false, error: `Manager Email: ${mgrEmailCheck.error}` };
+  if (input.managerEmail.trim().length > 0) {
+    const mgrEmailCheck = validateEmail(input.managerEmail);
+    if (!mgrEmailCheck.valid) return { valid: false, error: `Manager Email: ${mgrEmailCheck.error}` };
+  }
 
   if (!input.startDate || !input.contractEndDate) {
     return { valid: false, error: 'Start Date and Contract End Date are required.' };
@@ -540,6 +547,58 @@ export function validateApprovalSubmission(input: SubmitApprovalInput): Validati
 
   if (!input.targetRecordId.trim()) {
     return { valid: false, error: 'Target Record ID is required.' };
+  }
+
+  return { valid: true };
+}
+
+export function validateFieldOfficerForm(
+  input: FieldOfficerFormInput,
+  existingOfficers: FieldOfficerRecord[],
+  editingUid?: string
+): ValidationResult {
+  const nameCheck = validateRequiredText(input.fullName, 'Field Officer Full Name', 2, 100);
+  if (!nameCheck.valid) return nameCheck;
+
+  const phoneCheck = validatePhone(input.phone);
+  if (!phoneCheck.valid) return { valid: false, error: `Mobile Number: ${phoneCheck.error}` };
+
+  if (input.email.trim().length > 0) {
+    const emailCheck = validateEmail(input.email);
+    if (!emailCheck.valid) return { valid: false, error: `Email Address: ${emailCheck.error}` };
+  }
+
+  if (!input.branchId.trim() && (!input.assignedBranches || input.assignedBranches.length === 0)) {
+    return { valid: false, error: 'Select at least one Authorized Branch for this Field Officer.' };
+  }
+
+  const trimmedPwd = (input.initialPassword ?? '').trim();
+  if (trimmedPwd.length > 0 && trimmedPwd.length < 6) {
+    return { valid: false, error: 'Portal Login Password must be at least 6 characters long.' };
+  }
+
+  const normalizedPhone = input.phone.replace(/\D/g, '');
+  const dupPhone = existingOfficers.find(
+    (fo) => fo.uid !== editingUid && fo.phone.replace(/\D/g, '') === normalizedPhone
+  );
+  if (dupPhone) {
+    return {
+      valid: false,
+      error: `Duplicate prevented: Mobile number ${input.phone.trim()} is already registered to ${dupPhone.fullName} (${dupPhone.fieldOfficerId}).`,
+    };
+  }
+
+  if (input.email.trim().length > 0) {
+    const normalizedEmail = input.email.trim().toLowerCase();
+    const dupEmail = existingOfficers.find(
+      (fo) => fo.uid !== editingUid && fo.email.trim().toLowerCase() === normalizedEmail
+    );
+    if (dupEmail) {
+      return {
+        valid: false,
+        error: `Duplicate prevented: Email "${input.email.trim()}" is already assigned to ${dupEmail.fullName} (${dupEmail.fieldOfficerId}).`,
+      };
+    }
   }
 
   return { valid: true };

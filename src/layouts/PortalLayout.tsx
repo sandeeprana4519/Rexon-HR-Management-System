@@ -145,9 +145,23 @@ export const PortalLayout: React.FC<PortalLayoutProps> = ({ portal }) => {
             <PWAInstallButton fullWidth />
 
             {user && (
-              <div className="px-1">
-                <p className="text-xs font-semibold text-[#1F1916] truncate">{user.fullName}</p>
-                <p className="text-xs text-[#7D6F65] truncate">{user.email}</p>
+              <div className="px-1 flex items-center gap-2.5">
+                {user.profilePhoto ? (
+                  <img
+                    src={user.profilePhoto}
+                    alt={user.fullName}
+                    referrerPolicy="no-referrer"
+                    className="w-8 h-8 rounded-lg object-cover border border-[#D4C7B8] shrink-0"
+                  />
+                ) : (
+                  <UserCircle className="w-7 h-7 text-[#5C3D2E] shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-[#1F1916] truncate">{user.fullName}</p>
+                  <p className="text-[11px] font-mono-tabular text-[#7D6F65] truncate">
+                    {user.systemId || user.email}
+                  </p>
+                </div>
               </div>
             )}
 
@@ -194,7 +208,16 @@ export const PortalLayout: React.FC<PortalLayoutProps> = ({ portal }) => {
                 to={`${portal.basePath}/profile`}
                 className="min-h-[40px] inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-medium text-[#1F1916] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap shrink-0"
               >
-                <UserCircle className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+                {user?.profilePhoto ? (
+                  <img
+                    src={user.profilePhoto}
+                    alt={user.fullName}
+                    referrerPolicy="no-referrer"
+                    className="w-5 h-5 rounded-full object-cover border border-[#D4C7B8] shrink-0"
+                  />
+                ) : (
+                  <UserCircle className="w-4 h-4 text-[#5C3D2E] shrink-0" />
+                )}
                 <span className="hidden sm:inline max-w-[160px] truncate">
                   {user?.fullName ?? 'Account Profile'}
                 </span>

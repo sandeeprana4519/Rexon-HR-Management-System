@@ -7,6 +7,8 @@ export function sanitizeInput(value: string, maxLength = 200): string {
   return value.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, maxLength);
 }
 
+const SYSTEM_LOGIN_ID_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,64}$/;
+
 export function validateEmail(email: string): ValidationResult {
   const trimmed = email.trim();
   if (!trimmed) {
@@ -14,6 +16,23 @@ export function validateEmail(email: string): ValidationResult {
   }
   if (trimmed.length > 160 || !EMAIL_REGEX.test(trimmed)) {
     return { valid: false, error: 'Enter a valid business or personal email address.' };
+  }
+  return { valid: true };
+}
+
+export function validateLoginIdentifier(identifier: string): ValidationResult {
+  const trimmed = identifier.trim();
+  if (!trimmed) {
+    return { valid: false, error: 'Enter your Portal Login ID or Email Address.' };
+  }
+  if (trimmed.includes('@')) {
+    return validateEmail(trimmed);
+  }
+  if (!SYSTEM_LOGIN_ID_REGEX.test(trimmed)) {
+    return {
+      valid: false,
+      error: 'Enter a valid Portal ID (e.g. EMP-2026-0001) or Email Address.',
+    };
   }
   return { valid: true };
 }
@@ -29,17 +48,11 @@ export function validateLoginPassword(password: string): ValidationResult {
 }
 
 export function validateNewPassword(password: string, confirmPassword: string): ValidationResult {
-  if (!password || password.length < 8) {
-    return { valid: false, error: 'New password must be at least 8 characters long.' };
+  if (!password || password.length < 6) {
+    return { valid: false, error: 'New password must be at least 6 characters long.' };
   }
   if (password.length > 128) {
     return { valid: false, error: 'Password cannot exceed 128 characters.' };
-  }
-  if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
-    return {
-      valid: false,
-      error: 'Include at least one uppercase letter, one lowercase letter, and one number.',
-    };
   }
   if (password !== confirmPassword) {
     return { valid: false, error: 'Confirmation password does not match.' };

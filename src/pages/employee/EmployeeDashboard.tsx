@@ -36,6 +36,10 @@ import {
   EmployeeAssignmentRecord,
   EmployeeTodayDutyContext,
 } from '../../types';
+import {
+  deriveAttendanceVerificationStatus,
+  isAttendancePayrollEligible,
+} from '../../utils/attendanceValidation';
 import { getTodayIsoDate, isAssignmentActiveOnDate } from '../../utils/deploymentValidation';
 import {
   validatePositiveAmount,
@@ -97,6 +101,7 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
   const [liveCounts, setLiveCounts] = useState(ZERO_METRICS);
   const [dutyContext, setDutyContext] = useState<EmployeeTodayDutyContext | null>(null);
   const [myAttendanceRecords, setMyAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [photoLoadFailed, setPhotoLoadFailed] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('ALL');
@@ -160,6 +165,14 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
   const activeAttendance =
     dutyContext?.openOvernightAttendance ?? dutyContext?.todayAttendance ?? null;
 
+  const displayEmployeeId =
+    dutyContext?.employee?.employeeId || activeDutyToday?.employeeId || user?.uid || '—';
+  const profilePhotoUrl = dutyContext?.employee?.profilePhoto || user?.profilePhoto || '';
+
+  useEffect(() => {
+    setPhotoLoadFailed(false);
+  }, [profilePhotoUrl]);
+
   const currentSite =
     activeRoster?.siteName ??
     activeDutyToday?.siteName ??
@@ -181,15 +194,22 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
 
   const summaryStats = useMemo(() => {
     const currentMonthPrefix = getTodayIsoDate().slice(0, 7);
-    const monthPresentDays = myAttendanceRecords.filter(
+    const monthRows = myAttendanceRecords.filter((r) =>
+      r.attendanceDate.startsWith(currentMonthPrefix)
+    );
+    const monthPresentDays = monthRows.filter(
       (r) =>
-        r.attendanceDate.startsWith(currentMonthPrefix) &&
-        (r.status === 'Present' || r.status === 'Late' || r.status === 'Half Day')
+        r.status === 'Present' ||
+        r.status === 'Late' ||
+        r.status === 'Half Day' ||
+        r.status === 'On Duty'
     ).length;
+    const verifiedPayrollDays = monthRows.filter((r) => isAttendancePayrollEligible(r)).length;
 
     if (useSample && myAttendanceRecords.length === 0) {
       return {
         presentDays: 22,
+        verifiedPayrollDays: 20,
         leaveRequests: 1,
         advanceRequests: 1,
         salarySlips: 1,
@@ -197,6 +217,7 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
     }
     return {
       presentDays: monthPresentDays,
+      verifiedPayrollDays,
       leaveRequests: liveCounts.leaveRequestsCount,
       advanceRequests: liveCounts.advanceRequestsCount,
       salarySlips: 0,
@@ -256,12 +277,19 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
 
     setRequestFormMsg(
       isFirebaseConfigured
-        ? 'Request payload validated against Firestore schema; full Phase 2 HR request module will persist submissions.'
+        ? 'Request payload validated against Firestore schema; full Phase 5 Payroll & HR Request workflow will process settlement.'
         : 'Preview Mode Notice: Request validated locally; live Firestore writes are inactive until .env is configured.'
     );
   };
 
   if (!user) return null;
+
+  const initials = (dutyContext?.employee?.fullName || user.fullName || 'EMP')
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0]?.toUpperCase() || '')
+    .join('');
 
   return (
     <div className="space-y-8">
@@ -279,8 +307,10 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
           </h1>
           <p className="mt-1 text-sm text-[#574B43]">
             Employee ID:{' '}
-            <code className="font-mono-tabular font-semibold text-[#5C3D2E]">{user.uid}</code> ·
-            Isolated personal workspace
+            <code className="font-mono-tabular font-semibold text-[#5C3D2E]">
+              {displayEmployeeId}
+            </code>{' '}
+            · Isolated personal workspace
           </p>
         </div>
 
@@ -310,6 +340,15 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
         </div>
       </div>
 
+      {dutyContext?.approvedLeaveToday && (
+        <div className="p-4 rounded-xl bg-[#FAF8F5] border border-[#D4C7B8] text-xs text-[#4A3023]">
+          <strong>Approved Leave Today:</strong> {dutyContext.approvedLeaveToday.leaveType} (
+          {dutyContext.approvedLeaveToday.startDate} to {dutyContext.approvedLeaveToday.endDate}).
+          Regular check-in is disabled on approved leave dates unless HR schedules an explicit duty
+          roster.
+        </div>
+      )}
+
       {dutyContext && dutyContext.unreadNotificationsCount > 0 && (
         <div className="p-4 rounded-xl bg-[#F3EDE4] border border-[#D4C7B8] text-xs text-[#4A3023] flex items-center justify-between gap-4">
           <div className="flex items-center gap-2">
@@ -332,33 +371,56 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         {/* Profile, Site & Duty Assignment Card */}
         <section className="lg:col-span-7 bg-white border border-[#E5DDD2] rounded-xl p-5 sm:p-6 flex flex-col justify-between gap-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <span className="text-xs font-medium text-[#7D6F65]">Verified Personnel Profile</span>
-              <h2 className="mt-0.5 font-display text-xl font-bold text-[#1F1916]">
-                {user.fullName}
-              </h2>
-              <p className="mt-1 text-xs text-[#574B43]">
-                Employee ID <code className="font-mono-tabular text-[#5C3D2E]">{user.uid}</code> ·
-                Branch <code className="font-mono-tabular">{user.branchId}</code>
-              </p>
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              {profilePhotoUrl && !photoLoadFailed ? (
+                <img
+                  src={profilePhotoUrl}
+                  alt={`${dutyContext?.employee?.fullName || user.fullName} profile photo`}
+                  referrerPolicy="no-referrer"
+                  onError={() => setPhotoLoadFailed(true)}
+                  className="w-14 h-14 rounded-xl object-cover border border-[#D4C7B8] shrink-0"
+                />
+              ) : (
+                <div className="w-14 h-14 rounded-xl bg-[#F3EDE4] border border-[#D4C7B8] flex items-center justify-center font-display text-base font-bold text-[#5C3D2E] shrink-0">
+                  {initials}
+                </div>
+              )}
+              <div>
+                <span className="text-xs font-medium text-[#7D6F65]">
+                  Verified Personnel Profile
+                </span>
+                <h2 className="mt-0.5 font-display text-xl font-bold text-[#1F1916]">
+                  {dutyContext?.employee?.fullName || user.fullName}
+                </h2>
+                <p className="mt-1 text-xs text-[#574B43]">
+                  Employee ID{' '}
+                  <code className="font-mono-tabular font-semibold text-[#5C3D2E]">
+                    {displayEmployeeId}
+                  </code>{' '}
+                  · Branch{' '}
+                  <code className="font-mono-tabular">
+                    {dutyContext?.employee?.branchId || user.branchId}
+                  </code>
+                </p>
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Link
                 to="/employee/assignments"
-                className="min-h-[38px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap"
+                className="min-h-[40px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] transition-colors whitespace-nowrap"
               >
                 My Assignments
               </Link>
               <Link
                 to="/employee/my-record"
-                className="min-h-[38px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+                className="min-h-[40px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
               >
                 My HR Profile
               </Link>
               <Link
                 to="/employee/profile"
-                className="min-h-[38px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
+                className="min-h-[40px] inline-flex items-center px-3 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] transition-colors whitespace-nowrap"
               >
                 Account Settings
               </Link>
@@ -375,11 +437,13 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
                 {currentSite}
               </p>
               <p className="text-xs text-[#574B43]">
-                {activeDutyToday
-                  ? `${activeDutyToday.clientName} · ${activeDutyToday.designationName}`
-                  : useSample
-                    ? '[Sample] Main Gate & Access Control Post'
-                    : 'View full assignment history under My Assignments'}
+                {activeRoster
+                  ? `${activeRoster.clientName} · ${activeRoster.designationName}`
+                  : activeDutyToday
+                    ? `${activeDutyToday.clientName} · ${activeDutyToday.designationName}`
+                    : useSample
+                      ? '[Sample] Main Gate & Access Control Post'
+                      : 'View full assignment history under My Assignments'}
               </p>
             </div>
 
@@ -415,34 +479,46 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-semibold text-[#1F1916]">
-                GPS &amp; Shift QR Attendance
+                GPS, Photo &amp; Shift QR Attendance
               </h2>
               <BadgeCheck className="w-5 h-5 text-[#5C3D2E]" />
             </div>
             <p className="mt-1 text-xs text-[#574B43]">
-              Verify duty arrival and departure via one-shot site geofence GPS or rotating Shift QR.
+              Verify duty arrival and departure via site geofence GPS, live camera photo, or
+              rotating Shift QR.
             </p>
           </div>
 
-          <div className="bg-white border border-[#E5DDD2] rounded-lg p-3.5 grid grid-cols-3 gap-3 text-xs">
-            <div>
-              <span className="text-[#7D6F65] block">Check-In</span>
-              <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
-                {formattedCheckIn ?? '— : —'}
-              </span>
+          <div className="bg-white border border-[#E5DDD2] rounded-lg p-3.5 space-y-2 text-xs">
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <span className="text-[#7D6F65] block">Check-In</span>
+                <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
+                  {formattedCheckIn ?? '— : —'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[#7D6F65] block">Check-Out</span>
+                <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
+                  {formattedCheckOut ?? '— : —'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[#7D6F65] block">Status</span>
+                <span className="font-mono-tabular text-sm font-semibold text-[#5C3D2E]">
+                  {activeAttendance?.status ?? 'Not Marked'}
+                </span>
+              </div>
             </div>
-            <div>
-              <span className="text-[#7D6F65] block">Check-Out</span>
-              <span className="font-mono-tabular text-sm font-semibold text-[#1F1916]">
-                {formattedCheckOut ?? '— : —'}
-              </span>
-            </div>
-            <div>
-              <span className="text-[#7D6F65] block">Status</span>
-              <span className="font-mono-tabular text-sm font-semibold text-[#5C3D2E]">
-                {activeAttendance?.status ?? 'Not Marked'}
-              </span>
-            </div>
+            {activeAttendance && (
+              <div className="pt-2 border-t border-[#E5DDD2] text-[11px] text-[#574B43]">
+                Verification: <strong>{deriveAttendanceVerificationStatus(activeAttendance)}</strong>{' '}
+                ·{' '}
+                {isAttendancePayrollEligible(activeAttendance)
+                  ? 'Payroll Ready'
+                  : 'Awaiting HR Verification'}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -455,7 +531,7 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
               <span>
                 {activeAttendance?.checkInAt && !activeAttendance?.checkOutAt
                   ? 'Proceed to Check-Out'
-                  : 'Open GPS Check-In'}
+                  : 'Open Check-In Console'}
               </span>
             </button>
 
@@ -476,7 +552,7 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
         <StatMetricCard
           label="Attendance Summary"
           value={`${summaryStats.presentDays} Days`}
-          subtext="Verified duty attendance this cycle"
+          subtext={`${summaryStats.verifiedPayrollDays} HR-verified for payroll this month`}
           icon={CalendarCheck}
         />
         <StatMetricCard
@@ -506,8 +582,9 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
             My Requests, Salary Slips &amp; Authorized Documents
           </h2>
           <p className="text-xs text-[#574B43]">
-            Strictly scoped to your Employee UID (<code className="font-mono-tabular">{user.uid}</code>
-            ); other employees&apos; records are inaccessible.
+            Strictly scoped to your Employee ID (
+            <code className="font-mono-tabular">{displayEmployeeId}</code>); other employees&apos;
+            records are inaccessible.
           </p>
         </div>
 
@@ -611,7 +688,7 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
               <button
                 type="button"
                 onClick={() => setRequestModalType(null)}
-                className="min-h-[36px] min-w-[36px] rounded-lg flex items-center justify-center text-[#7D6F65] hover:text-[#1F1916]"
+                className="min-h-[38px] min-w-[38px] rounded-lg flex items-center justify-center text-[#7D6F65] hover:text-[#1F1916]"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
@@ -690,13 +767,13 @@ export const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({
                 <button
                   type="button"
                   onClick={() => setRequestModalType(null)}
-                  className="min-h-[42px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#FAF8F5] border border-[#E5DDD2] text-xs font-semibold text-[#1F1916]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="min-h-[42px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
+                  className="min-h-[44px] px-4 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023]"
                 >
                   Submit Request
                 </button>

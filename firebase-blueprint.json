@@ -528,7 +528,8 @@
         "assignmentId": { "type": "string", "maxLength": 64 },
         "dutyDate": { "type": "string", "maxLength": 10 },
         "dutyEndDate": { "type": "string", "maxLength": 10 },
-        "shiftType": { "type": "string", "enum": ["Day Shift", "Night Shift", "General Shift", "Rotational Shift", "Custom Shift"] },
+        "shiftId": { "type": "string", "maxLength": 64 },
+        "shiftType": { "type": "string", "enum": ["General Shift", "Morning Shift", "Evening Shift", "Day Shift", "Night Shift", "Rotational Shift", "Custom Shift"] },
         "dutyStartTime": { "type": "string", "maxLength": 5 },
         "dutyEndTime": { "type": "string", "maxLength": 5 },
         "crossesMidnight": { "type": "boolean" },
@@ -537,6 +538,7 @@
         "netScheduledMinutes": { "type": "integer" },
         "reportingTime": { "type": "string", "maxLength": 5 },
         "gracePeriodMinutes": { "type": "integer" },
+        "weeklyOffDay": { "type": "string", "maxLength": 32 },
         "assignedFieldOfficerUid": { "type": "string", "maxLength": 128 },
         "assignedFieldOfficerName": { "type": "string", "maxLength": 120 },
         "dutyInstructions": { "type": "string", "maxLength": 400 },
@@ -583,11 +585,16 @@
         "crossesMidnight": { "type": "boolean" },
         "breakDurationMinutes": { "type": "integer" },
         "gracePeriodMinutes": { "type": "integer" },
-        "status": { "type": "string", "enum": ["Present", "Absent", "Late", "Half Day", "Weekly Off", "Holiday", "Leave", "Pending", "Exception"] },
+        "status": { "type": "string", "enum": ["Present", "On Duty", "Absent", "Late", "Half Day", "Incomplete", "Weekly Off", "Holiday", "Leave", "Pending", "Exception", "Rejected"] },
+        "verificationStatus": { "type": "string", "enum": ["Pending", "Verified", "Rejected", "Exception Approved"] },
+        "locationStatus": { "type": "string", "enum": ["Within Geofence", "Outside Geofence", "GPS Accuracy Low", "GPS Permission Denied", "Location Unavailable"] },
+        "isPayrollEligible": { "type": "boolean" },
         "checkInAt": { "type": "string", "maxLength": 40 },
         "checkOutAt": { "type": "string", "maxLength": 40 },
         "checkInMethod": { "type": "string", "enum": ["GPS", "QR", "Manual_HR"] },
         "checkOutMethod": { "type": "string", "enum": ["GPS", "QR", "Manual_HR"] },
+        "checkInPhoto": { "type": "object" },
+        "checkOutPhoto": { "type": "object" },
         "qrSessionId": { "type": "string", "maxLength": 64 },
         "qrVerificationStatus": { "type": "string", "maxLength": 80 },
         "totalGrossMinutes": { "type": "integer" },
@@ -606,6 +613,9 @@
         "exceptionReason": { "type": "string", "maxLength": 300 },
         "hrRemarks": { "type": "string", "maxLength": 300 },
         "fieldOfficerRemarks": { "type": "string", "maxLength": 300 },
+        "timeCorrectionHistory": { "type": "array" },
+        "idempotencyKey": { "type": "string", "maxLength": 160 },
+        "offlineClientPunchId": { "type": "string", "maxLength": 128 },
         "createdBy": { "type": "string", "maxLength": 128 },
         "updatedBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -705,7 +715,7 @@
       "type": "object",
       "properties": {
         "auditId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "category": { "type": "string", "enum": ["Roster", "Attendance", "Geofence", "QR", "Correction", "Overtime"] },
+        "category": { "type": "string", "enum": ["Roster", "Attendance", "Geofence", "QR", "Correction", "Overtime", "Shift", "FieldReport"] },
         "targetId": { "type": "string", "maxLength": 64 },
         "employeeId": { "type": "string", "maxLength": 64 },
         "siteId": { "type": "string", "maxLength": 64 },
@@ -747,6 +757,90 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["summaryId", "siteId", "siteName", "clientId", "branchId", "attendanceDate", "totalSanctioned", "totalDeployed", "presentCount", "absentCount", "updatedAt"]
+    },
+    "ShiftMaster": {
+      "title": "ShiftMaster",
+      "description": "Reusable shift master configuration supporting General, Morning, Evening, Night (midnight-crossing), Day, Rotational, and Custom shifts.",
+      "type": "object",
+      "properties": {
+        "shiftId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "shiftName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "shiftCode": { "type": "string", "minLength": 2, "maxLength": 24 },
+        "shiftType": { "type": "string", "enum": ["General Shift", "Morning Shift", "Evening Shift", "Day Shift", "Night Shift", "Rotational Shift", "Custom Shift"] },
+        "startTime": { "type": "string", "maxLength": 5 },
+        "endTime": { "type": "string", "maxLength": 5 },
+        "reportingTime": { "type": "string", "maxLength": 5 },
+        "gracePeriodMinutes": { "type": "integer" },
+        "breakDurationMinutes": { "type": "integer" },
+        "weeklyOffDay": { "type": "string", "maxLength": 32 },
+        "crossesMidnight": { "type": "boolean" },
+        "overtimeEligible": { "type": "boolean" },
+        "cutoffMinutesAfterEnd": { "type": "integer" },
+        "status": { "type": "string", "enum": ["Active", "Inactive"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["shiftId", "shiftName", "shiftCode", "shiftType", "startTime", "endTime", "reportingTime", "crossesMidnight", "status", "createdAt", "updatedAt"]
+    },
+    "AttendanceException": {
+      "title": "AttendanceException",
+      "description": "Field Officer and HR site attendance monitoring reports (Missing Attendance, Attendance Issue, Site Visit Report, Employee Replacement Requirement) with optional site photo.",
+      "type": "object",
+      "properties": {
+        "exceptionId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "reportType": { "type": "string", "enum": ["Missing Attendance", "Attendance Issue", "Site Visit Report", "Employee Replacement Requirement"] },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "clientId": { "type": "string", "maxLength": 64 },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "attendanceDate": { "type": "string", "maxLength": 10 },
+        "employeeId": { "type": "string", "maxLength": 64 },
+        "employeeName": { "type": "string", "maxLength": 120 },
+        "shiftType": { "type": "string", "maxLength": 60 },
+        "summary": { "type": "string", "minLength": 4, "maxLength": 160 },
+        "remarks": { "type": "string", "minLength": 6, "maxLength": 400 },
+        "photoUrl": { "type": "string", "maxLength": 120000 },
+        "photoStoragePath": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["Pending HR Review", "Resolved", "Rejected"] },
+        "reportedByUid": { "type": "string", "maxLength": 128 },
+        "reportedByName": { "type": "string", "maxLength": 120 },
+        "reportedByRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "hrResolutionNotes": { "type": "string", "maxLength": 300 },
+        "reviewedAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["exceptionId", "reportType", "branchId", "siteId", "attendanceDate", "summary", "remarks", "status", "reportedByUid", "createdAt", "updatedAt"]
+    },
+    "AttendanceApproval": {
+      "title": "AttendanceApproval",
+      "description": "Admin approval workflow for site geofence radius overrides requested by HR.",
+      "type": "object",
+      "properties": {
+        "approvalId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "approvalType": { "type": "string", "enum": ["Site Geofence Radius Override"] },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "siteId": { "type": "string", "maxLength": 64 },
+        "siteName": { "type": "string", "maxLength": 140 },
+        "requestedRadiusMeters": { "type": "integer" },
+        "currentRadiusMeters": { "type": "integer" },
+        "reason": { "type": "string", "minLength": 6, "maxLength": 300 },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
+        "requestedByUid": { "type": "string", "maxLength": 128 },
+        "requestedByName": { "type": "string", "maxLength": 120 },
+        "requestedByRole": { "type": "string", "enum": ["admin", "hr", "field_officer", "site", "employee"] },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewRemarks": { "type": "string", "maxLength": 300 },
+        "reviewedAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["approvalId", "approvalType", "branchId", "siteId", "requestedRadiusMeters", "reason", "status", "requestedByUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -849,6 +943,18 @@
     "/siteAttendanceSummaries/{summaryId}": {
       "schema": { "$ref": "#/entities/SanitizedSiteAttendanceSummary" },
       "description": "Sanitized headcount-only daily site turnout summaries readable by Site Portal for assignedSiteIds."
+    },
+    "/shifts/{shiftId}": {
+      "schema": { "$ref": "#/entities/ShiftMaster" },
+      "description": "Shift master definitions supporting standard, rotational, and overnight midnight-crossing schedules."
+    },
+    "/attendanceExceptions/{exceptionId}": {
+      "schema": { "$ref": "#/entities/AttendanceException" },
+      "description": "Field Officer site attendance monitoring & visit reports resolved by HR/Admin."
+    },
+    "/attendanceApprovals/{approvalId}": {
+      "schema": { "$ref": "#/entities/AttendanceApproval" },
+      "description": "Site geofence radius override approval requests reviewed by Admin."
     }
   }
 }

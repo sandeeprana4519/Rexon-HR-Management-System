@@ -8,6 +8,7 @@ import {
   Eye,
   FileWarning,
   Filter,
+  KeyRound,
   MapPin,
   Plus,
   RefreshCw,
@@ -23,9 +24,11 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { EmployeeFormModal } from '../../components/EmployeeFormModal';
 import { EmptyStatePanel } from '../../components/EmptyStatePanel';
 import { PaginationControls } from '../../components/PaginationControls';
+import { PortalCredentialSlipModal } from '../../components/PortalCredentialSlipModal';
 import { StatMetricCard } from '../../components/StatMetricCard';
 import { useAuth } from '../../hooks/useAuth';
 import {
+  getIssuedCredentialsForEmployee,
   listEmployees,
   softDeleteEmployeeRecord,
   subscribeEmployeeData,
@@ -45,6 +48,7 @@ import {
   DesignationRecord,
   EMPLOYEE_STATUSES,
   EmployeeRecord,
+  IssuedPortalCredentials,
   SERVICE_CATEGORIES,
   ServiceRecord,
   SiteRecord,
@@ -114,9 +118,18 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [submittingApproval, setSubmittingApproval] = useState(false);
 
+  // Issued Employee Portal Credentials Slip Modal
+  const [slipCredentials, setSlipCredentials] = useState<IssuedPortalCredentials | null>(null);
+  const [loadingCredsEmpId, setLoadingCredsEmpId] = useState<string | null>(null);
+
   const isFieldOfficer = fieldOfficerView || user?.role === 'field_officer';
   const isAdmin = user?.role === 'admin';
   const canCreate = !isFieldOfficer && (isAdmin || hasUserPermission(user, 'employee.create'));
+  const canInspectCredentials =
+    !isFieldOfficer &&
+    (isAdmin ||
+      hasUserPermission(user, 'employee.create') ||
+      hasUserPermission(user, 'employee.manage'));
   const canEdit = !isFieldOfficer && (isAdmin || hasUserPermission(user, 'employee.edit'));
   const canDirectDelete =
     !isFieldOfficer && (isAdmin || hasUserPermission(user, 'employee.delete'));
@@ -311,6 +324,19 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
     deploymentFilter,
     sortBy,
   ]);
+
+  const handleShowEmployeeCredentials = async (emp: EmployeeRecord) => {
+    if (!user) return;
+    setLoadingCredsEmpId(emp.employeeId);
+    try {
+      const creds = await getIssuedCredentialsForEmployee(user, isPreviewSession, emp);
+      setSlipCredentials(creds);
+    } catch (err) {
+      setFeedback({ type: 'error', text: formatServiceErrorMessage(err) });
+    } finally {
+      setLoadingCredsEmpId(null);
+    }
+  };
 
   const handleConfirmToggleStatus = async () => {
     if (!user || !statusToggleTarget) return;
@@ -798,6 +824,7 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
                             <img
                               src={emp.profilePhoto}
                               alt={emp.fullName}
+                              referrerPolicy="no-referrer"
                               className="w-9 h-9 rounded-lg object-cover border border-[#D4C7B8] shrink-0"
                             />
                           ) : (
@@ -865,6 +892,23 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
 
                       <td className="py-3.5 px-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-1.5">
+                          {canInspectCredentials && (
+                            <button
+                              type="button"
+                              disabled={loadingCredsEmpId === emp.employeeId}
+                              onClick={() => void handleShowEmployeeCredentials(emp)}
+                              className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] hover:bg-[#F3EDE4] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                              title="View Employee Portal Login ID & Password"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              <span>
+                                {loadingCredsEmpId === emp.employeeId
+                                  ? 'Loading...'
+                                  : 'ID & Password'}
+                              </span>
+                            </button>
+                          )}
+
                           <button
                             type="button"
                             onClick={() => navigate(`${portalBasePath}/${emp.employeeId}`)}
@@ -948,6 +992,7 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
                         <img
                           src={emp.profilePhoto}
                           alt={emp.fullName}
+                          referrerPolicy="no-referrer"
                           className="w-11 h-11 rounded-lg object-cover border border-[#D4C7B8] shrink-0"
                         />
                       ) : (
@@ -992,10 +1037,21 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
                     <button
                       type="button"
                       onClick={() => navigate(`${portalBasePath}/${emp.employeeId}`)}
-                      className="min-h-[40px] flex-1 px-3 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] text-center"
+                      className="min-h-[40px] flex-1 px-3 py-2 rounded-lg bg-[#5C3D2E] text-xs font-semibold text-white hover:bg-[#4A3023] text-center whitespace-nowrap"
                     >
                       View Profile
                     </button>
+                    {canInspectCredentials && (
+                      <button
+                        type="button"
+                        disabled={loadingCredsEmpId === emp.employeeId}
+                        onClick={() => void handleShowEmployeeCredentials(emp)}
+                        className="min-h-[40px] px-3 py-2 rounded-lg bg-white border border-[#D4C7B8] text-xs font-semibold text-[#5C3D2E] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>ID &amp; Password</span>
+                      </button>
+                    )}
                     {canEdit && (
                       <>
                         <button
@@ -1066,15 +1122,18 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
           caller={user}
           isPreviewSession={isPreviewSession}
           onClose={() => setFormModalState({ open: false, mode: 'create', employee: null })}
-          onSaved={(saved) => {
+          onSaved={(saved, issuedCredentials) => {
             const wasEdit = formModalState.mode === 'edit';
             setFormModalState({ open: false, mode: 'create', employee: null });
             setFeedback({
               type: 'success',
               text: wasEdit
                 ? `Updated Employee ${saved.employeeId} (${saved.fullName}) successfully.`
-                : `Registered Employee ${saved.employeeId} (${saved.fullName}). Upload KYC documents on their profile page.`,
+                : `Registered Employee ${saved.employeeId} (${saved.fullName}) and issued Employee Portal Login ID & Password.`,
             });
+            if (issuedCredentials) {
+              setSlipCredentials(issuedCredentials);
+            }
             void loadData();
           }}
         />
@@ -1185,6 +1244,12 @@ export const EmployeeManagementPage: React.FC<EmployeeManagementPageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Issued Employee Portal Login ID & Password Slip Modal */}
+      <PortalCredentialSlipModal
+        credentials={slipCredentials}
+        onClose={() => setSlipCredentials(null)}
+      />
     </div>
   );
 };
